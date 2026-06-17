@@ -1,0 +1,45 @@
+# Live integration test against the BOOM (kaboom) API.
+#
+# This re-queries the fixed "gold standard" window and diffs the result against
+# the committed snapshot (tests/desi_aap/data/gold_standard_alerts.csv).
+#
+# It needs live credentials, so it does NOT run on pull requests from forks
+# (which cannot read secrets). Add the credentials under:
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+# as BOOM_USERNAME and BOOM_PASSWORD. The access token is minted fresh at
+# runtime from these and is never stored.
+
+name: BOOM integration test
+
+on:
+  # Run manually from the Actions tab.
+  workflow_dispatch:
+  # Run on a schedule to catch upstream drift.
+  schedule:
+    - cron: 30 7 * * *
+  # Run on pushes to main (secrets are available for same-repo pushes).
+  push:
+    branches: [ main ]
+
+jobs:
+  gold-standard:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        uv pip install --system -e .[dev]
+        if [ -f requirements.txt ]; then uv pip install --system -r requirements.txt; fi
+    - name: Run BOOM gold-standard regression test
+      env:
+        BOOM_USERNAME: ${{ secrets.BOOM_USERNAME }}
+        BOOM_PASSWORD: ${{ secrets.BOOM_PASSWORD }}
+      run: |
+        python -m pytest tests/desi_aap/test_boom.py::test_gold_standard -v

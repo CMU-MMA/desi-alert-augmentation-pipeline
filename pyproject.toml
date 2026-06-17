@@ -18,6 +18,9 @@ classifiers = [
 dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
+    "astropy",
+    "pandas",
+    "requests",
 ]
 
 [project.urls]
