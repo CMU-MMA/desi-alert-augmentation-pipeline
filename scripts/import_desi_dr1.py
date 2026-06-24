@@ -1,10 +1,8 @@
 import pyarrow as pa
-
 from dask.distributed import Client
 from hats_import import CollectionArguments, pipeline_with_client
 from hats_import.catalog.file_readers import FitsReader
 from upath import UPath
-
 
 base_path = UPath("/ocean/projects/phy250012p/shared/3DTS/DESI/dr1")
 

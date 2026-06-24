@@ -93,7 +93,8 @@ ignore = [
     "UP015", # Allow redundant open parameters
     "UP028", # Allow yield in for loop
 ]
-
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["D101","D102","D103"]
 
 [tool.coverage.run]
 omit=["src/desi_aap/_version.py"]

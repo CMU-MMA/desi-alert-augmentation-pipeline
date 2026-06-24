@@ -1,14 +1,11 @@
 import pyarrow as pa
-
 from astropy.io import fits
 from astropy.table import Table, join
 from dask.distributed import Client
 from hats_import import CollectionArguments, pipeline_with_client
 from hats_import.catalog.file_readers import InputReader
 from hats_import.catalog.file_readers.fits import _astropy_to_pyarrow_table
-
 from upath import UPath
-
 
 base_path = UPath("/ocean/projects/phy250012p/shared/3DTS/DESI/dr2")
 
