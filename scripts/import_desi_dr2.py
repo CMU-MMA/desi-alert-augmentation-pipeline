@@ -70,6 +70,7 @@ def import_desi_dr2():
             pixel_threshold=400_000,
             highest_healpix_order=8,
             skymap_alt_orders=[2, 4, 6],
+            npix_suffix="/",
         )
         .add_margin(margin_threshold=5.0, is_default=True)
         .add_index(indexing_column="TARGETID")
