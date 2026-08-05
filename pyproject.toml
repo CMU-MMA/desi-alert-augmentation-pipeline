@@ -105,6 +105,12 @@ ignore = [
     "UP028", # Allow yield in for loop
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# raster_3d_density_slice names its intermediates after the quantities they hold, so dP_dA
+# is the probability density per unit area and dV a volume element. Lowercasing them to
+# satisfy pep8-naming would leave dp_da and dv, which no longer read as the maths.
+"src/desi_aap/skymap_plots.py" = ["N806"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
