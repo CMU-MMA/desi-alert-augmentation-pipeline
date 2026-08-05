@@ -756,7 +756,12 @@ def run_3d_spatial_crossmatch(temporal_matches, gw_events):
         event = event_lookup.loc[superevent_id]
 
         skymap_path = event.get("skymap_path")
-        if not skymap_path or not Path(skymap_path).exists():
+        # pd.isna is checked first because a missing skymap_path reaches here as NaN as often
+        # as it does as None, and NaN is truthy, so "not skymap_path" alone lets it through to
+        # Path(), which raises TypeError on a float. A gw_events row that failed its file
+        # listing has no skymap_path key at all and pandas fills it with NaN; newer pandas also
+        # stores an assigned None as NaN in an object column.
+        if pd.isna(skymap_path) or not skymap_path or not Path(skymap_path).exists():
             chunks.append(failed_spatial_rows(sn_rows, "missing_skymap"))
             continue
         if skymap_path not in skymap_cache:

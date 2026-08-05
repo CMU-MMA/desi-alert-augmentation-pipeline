@@ -882,18 +882,29 @@ def test_run_3d_spatial_crossmatch_caches_skymaps(monkeypatch, temporal_matches)
     assert len(df) == 4 * len(COSMOLOGIES)
 
 
-def test_run_3d_spatial_crossmatch_reports_a_missing_skymap(monkeypatch, temporal_matches) -> None:
-    """Verify `run_3d_spatial_crossmatch` keeps rows for events with no skymap on disk"""
+@pytest.mark.parametrize("missing", [None, np.nan, "", "does/not/exist.fits"])
+def test_run_3d_spatial_crossmatch_reports_a_missing_skymap(monkeypatch, temporal_matches, missing) -> None:
+    """Verify `run_3d_spatial_crossmatch` keeps rows for events with no usable skymap
+
+    A skymap_path can be unusable in four ways, and all four are exercised here. It can be
+    missing as None, which is what fetch_gracedb_superevents writes when there was no skymap
+    or the download failed. It can be missing as NaN, which is what pandas fills in for a row
+    that failed its file listing and so has no skymap_path key at all, and what pandas from
+    3.0 stores for an assigned None even in an object column. Or it can be present but
+    unusable: an empty string, or a path to a file that is not there.
+
+    The NaN case is the one worth guarding. NaN is truthy, so a "not skymap_path" check
+    passes it straight through to Path(), which raises TypeError on a float.
+    """
     matches, gw_events = temporal_matches
     reads, _ = install_fake_skymap(monkeypatch)
+    gw_events["skymap_path"] = gw_events["skymap_path"].astype(object)
+    gw_events.loc[0, "skymap_path"] = missing
 
-    gw_events.loc[0, "skymap_path"] = None
     df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
-    assert df["spatial_status"].tolist() == ["missing_skymap"] * 2
 
-    gw_events.loc[0, "skymap_path"] = "does/not/exist.fits"
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
     assert df["spatial_status"].tolist() == ["missing_skymap"] * 2
+    assert not df["inside_2d_credible_level"].any()
     assert not df["inside_3d_credible_level"].any()
     assert reads == []
 
