@@ -1,4 +1,39 @@
-"""TODO"""
+"""Diagnostic sky plots for SN/GW 3D coincidences.
+
+Renders one Mollweide map per coincidence, showing the GW skymap's probability with the
+SN marked and the crossmatch numbers summarized alongside, and writes it to PLOT_DIR.
+"""
+
+"""
+Where Claude was assuming most, in order:
+
+raster_3d_density_slice — the physics. This is by far the biggest leap. I kept your original summary line
+verbatim and described the two return values by their role rather than asserting physical units. Specifically
+I say density_at_distance is "per-pixel posterior density at dl_mpc, directly comparable against
+density_threshold" — because the contract I'm confident about is that the two are comparable, since the caller
+thresholds one against the other. Reading the math, it looks like probability per unit volume with the r²
+absorbed, divided by dVC_dVL_for_DL for comoving ranking — but I deliberately did not write that, because it's
+my reconstruction of the ansatz, not something the code states. If you know the intended normalization, that
+sentence is the one to correct.
+
+raster_prob_from_moc returning nested ordering. Inferred, not stated. Supported by moc.rasterize semantics and
+by every downstream call passing nest=True, so I'm fairly confident — but the function itself never says so.
+
+draw_contours returning False. I wrote "the 3D slice was unavailable and only the 2D contour was drawn."
+That's what the code does, but since nothing calls it, that return contract has never actually been exercised.
+"""
+
+# TODO: draw_contours is never called, and since raster_3d_density_slice is only used by draw_contours, it is
+# also never called.
+
+# That has a visible consequence in the output. In plot_3d_coincidence, drew_3d = False is set at line 202
+# and never reassigned, so the if not drew_3d: branch at line 222 always wins, and the legend on every PDF
+# you've generated says the 3D contour is "unavailable for this slice". No contour is drawn either — neither
+# the white 2D one nor the amber 3D one — despite all ten PLOT_2D_CONTOUR_* / PLOT_3D_CONTOUR_* constants.
+# The wiring looks like it was started and not finished.
+
+# TODO: do we want to be outputting to PDF? that's what the original code did, but is it best for in-notebook
+# use? Maybe, if it isn't too burdensome, have options?
 
 from pathlib import Path
 
@@ -62,6 +97,22 @@ LEGEND_ALPHA = 0.88
 
 
 def raster_prob_from_moc(skymap, order=PLOT_HEALPIX_ORDER):
+    """Rasterize a multiorder skymap into a flat HEALPix probability-per-pixel map.
+
+    Parameters
+    ----------
+    skymap : astropy.table.Table
+        Multiorder skymap, as returned by ligo.skymap.io.read_sky_map with moc=True.
+        Whichever of PROB or PROBDENSITY is present is used.
+    order : int, optional
+        HEALPix order to rasterize to. Defaults to PLOT_HEALPIX_ORDER.
+
+    Returns
+    -------
+    numpy.ndarray
+        Probability per pixel in nested ordering, with non-finite values zeroed and the
+        total normalized to 1. A map summing to zero is returned unnormalized.
+    """
     raster = moc.rasterize(skymap, order=order)
     nside = hp.npix2nside(len(raster))
     if "PROB" in raster.dtype.names:
@@ -76,7 +127,37 @@ def raster_prob_from_moc(skymap, order=PLOT_HEALPIX_ORDER):
 
 
 def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=PLOT_HEALPIX_ORDER):
-    """Return an approximate projected 3D contour map at one distance."""
+    """Return an approximate projected 3D contour map at one distance.
+
+    Evaluates the skymap's 3D posterior across the sky at a single luminosity distance and
+    finds the density threshold enclosing contour_level of the total probability, so the
+    two can be handed straight to a contouring routine. Ranking follows
+    USE_COMOVING_VOLUME_RANKING, so the contour is comparable to the credible levels
+    reported by run_3d_spatial_crossmatch.
+
+    Parameters
+    ----------
+    skymap : astropy.table.Table
+        Multiorder skymap carrying PROBDENSITY, DISTMU, DISTSIGMA and DISTNORM columns.
+    dl_mpc : float
+        Luminosity distance in Mpc to evaluate at, normally the SN's distance under the
+        cosmology being plotted.
+    contour_level : float, optional
+        Credible level the threshold should enclose. Defaults to CREDIBLE_LEVEL.
+    order : int, optional
+        HEALPix order to rasterize to. Defaults to PLOT_HEALPIX_ORDER.
+
+    Returns
+    -------
+    density_at_distance : numpy.ndarray or None
+        Per-pixel posterior density at dl_mpc, in nested ordering with non-finite values
+        zeroed, directly comparable against density_threshold. None when the skymap has no
+        usable distance pixels, when dl_mpc is not finite, or when the posterior carries no
+        probability.
+    density_threshold : float
+        Density bounding the contour_level region, or NaN whenever density_at_distance is
+        None.
+    """
     raster = moc.rasterize(skymap, order=order)
     nside = hp.npix2nside(len(raster))
     dA = np.full(len(raster), hp.nside2pixarea(nside))
@@ -145,6 +226,29 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=
 
 
 def draw_contours(prob, skymap, row):
+    """Overlay the 2D and projected 3D credible contours on the current healpy plot.
+
+    Draws into the active matplotlib figure through healpy's projection helpers, so a map
+    must already have been plotted. The 2D contour is always attempted; the 3D one is
+    projected at the SN's distance and may be unavailable for that slice.
+
+    Parameters
+    ----------
+    prob : numpy.ndarray
+        Probability per pixel, from raster_prob_from_moc.
+    skymap : astropy.table.Table
+        The multiorder skymap those probabilities came from, needed for its distance
+        columns.
+    row : pandas.Series
+        A row of the run_3d_spatial_crossmatch output. Only sn_dist_mpc is read, giving the
+        distance the 3D contour is projected at.
+
+    Returns
+    -------
+    bool
+        True if at least one 3D contour polygon was drawn, False if the 3D slice was
+        unavailable and only the 2D contour was drawn.
+    """
     credible_2d = find_greedy_credible_levels(prob)
     for polygon in contour(credible_2d, [CREDIBLE_LEVEL], nest=True, degrees=True)[0]:
         polygon = np.asarray(polygon)
@@ -179,6 +283,34 @@ def draw_contours(prob, skymap, row):
 
 
 def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR):
+    """Render and save a Mollweide sky plot for one SN/GW coincidence.
+
+    Plots the event's skymap probability, marks the SN, and annotates the figure with the
+    crossmatch numbers for that SN and cosmology. One file is written per call, so callers
+    iterating over coincidences get one plot per (SN, event, cosmology) row.
+
+    Parameters
+    ----------
+    row : pandas.Series
+        A row of the run_3d_spatial_crossmatch output, normally one of the coincidences
+        filtered on spatial_status and inside_3d_credible_level. Read for superevent_id,
+        name, type, cosmology, ra, declination, sn_dist_mpc, days_from_gw,
+        searched_prob_2d, searched_prob_3d_density_rank, searched_prob_dist,
+        credible_area_deg2 and credible_volume_mpc3, plus gw_far_per_year, gw_p_bns and
+        gw_p_nsbh, which fall back to NaN in the annotation when absent.
+    gw_events : pandas.DataFrame
+        Superevent table from fetch_gracedb_superevents, used to look up the event's
+        skymap_path by superevent_id.
+    outdir : pathlib.Path, optional
+        Directory to write into, created if it does not exist. Defaults to PLOT_DIR, which
+        is relative to the working directory.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the written file, named
+        "<superevent_id>__<name>__<cosmology>.<PLOT_OUTPUT_FORMAT>".
+    """
     outdir.mkdir(exist_ok=True)
     event = gw_events.set_index("superevent_id").loc[row["superevent_id"]]
     skymap = read_sky_map(event["skymap_path"], moc=True)
