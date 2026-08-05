@@ -102,6 +102,9 @@ ignore = [
     "UP028", # Allow yield in for loop
 ]
 
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
 
 [tool.coverage.run]
 omit=["src/desi_aap/_version.py"]
