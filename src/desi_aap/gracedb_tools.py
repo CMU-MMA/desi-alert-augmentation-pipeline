@@ -214,20 +214,6 @@ def skymap_priority(name):
     which take a fixed SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY. Names that are not skymaps at
     all rank at SKYMAP_PRIORITY_IGNORE or above.
 
-    Versioned names are in practice not merely deprioritized but skipped outright. GraceDB
-    puts the revision suffix after the full file name, as in "bayestar.multiorder.fits,0",
-    so such a name fails the endswith check on the extension below and returns
-    SKYMAP_PRIORITY_IGNORE before any of the pipeline and format branches, and before the
-    penalty means anything. Every revision therefore lands above the ignore threshold and
-    choose_skymap_file never selects one; a superevent that has only versioned copies of its
-    skymap looks to the rest of the pipeline as though it has no skymap, and its SNe come
-    out of run_3d_spatial_crossmatch with spatial_status "missing_skymap". This is harmless
-    while GraceDB keeps publishing the unversioned alias alongside the revisions.
-    SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY is dead weight as long as this holds. Stripping
-    the suffix before the extension check is what would make the paragraph above true.
-
-    #TODO Check with Xander whether versioned skymaps should be usable fallbacks
-
     Parameters
     ----------
     name : str
@@ -238,29 +224,27 @@ def skymap_priority(name):
     int
         Priority built from the SKYMAP_PRIORITY_* constants. Values below
         SKYMAP_PRIORITY_IGNORE identify usable skymaps.
-
-    References
-    ----------
-    IGWN Public Alerts User Guide, "Alert Contents": "The version number is automatically
-    assigned by GraceDB, starting from 0, and increments for each file of the same name...
-    The filename without the version suffix, such as bayestar.multiorder.fits, always points
-    to the most recent version." https://emfollow.docs.ligo.org/userguide/content.html
     """
     lower = name.lower()
     version_penalty = SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY if re.search(r",\d+$", lower) else 0
-    if not lower.endswith((".multiorder.fits", ".fits.gz", ".fits")):
+    if lower.count(",") > 1:
+        print(
+            f"Warning: file name {name} has more than one comma, which creates issues with version selection."
+        )
+    unversioned = lower.split(",", 1)[0]
+    if not unversioned.endswith((".multiorder.fits", ".fits.gz", ".fits")):
         return SKYMAP_PRIORITY_IGNORE + version_penalty
-    if "bilby.multiorder.fits" in lower:
+    if "bilby.multiorder.fits" in unversioned:
         return SKYMAP_PRIORITY_BILBY_MULTIORDER + version_penalty
-    if "bayestar.multiorder.fits" in lower:
+    if "bayestar.multiorder.fits" in unversioned:
         return SKYMAP_PRIORITY_BAYESTAR_MULTIORDER + version_penalty
-    if lower.endswith(".multiorder.fits"):
+    if unversioned.endswith(".multiorder.fits"):
         return SKYMAP_PRIORITY_ANY_MULTIORDER + version_penalty
-    if "bayestar" in lower and lower.endswith(".fits.gz"):
+    if "bayestar" in unversioned and unversioned.endswith(".fits.gz"):
         return SKYMAP_PRIORITY_BAYESTAR_FITS_GZ + version_penalty
-    if lower.endswith(".fits.gz"):
+    if unversioned.endswith(".fits.gz"):
         return SKYMAP_PRIORITY_ANY_FITS_GZ + version_penalty
-    if lower.endswith(".fits"):
+    if unversioned.endswith(".fits"):
         return SKYMAP_PRIORITY_ANY_FITS + version_penalty
     return SKYMAP_PRIORITY_IGNORE + version_penalty
 
