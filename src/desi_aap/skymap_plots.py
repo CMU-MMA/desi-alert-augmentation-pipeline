@@ -4,21 +4,16 @@ Renders one Mollweide map per coincidence, showing the GW skymap's probability w
 SN marked and the crossmatch numbers summarized alongside, and writes it to PLOT_DIR.
 """
 
-"""
-draw_contours returning False. I wrote "the 3D slice was unavailable and only the 2D contour was drawn."
-That's what the code does, but since nothing calls it, that return contract has never actually been exercised.
-"""
-
 from pathlib import Path
 
-import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from ligo.skymap.io import read_sky_map
+import numpy as np
 from ligo.skymap import distance, moc
+from ligo.skymap.io import read_sky_map
 from ligo.skymap.postprocess import contour, find_greedy_credible_levels
 from ligo.skymap.postprocess.cosmology import dVC_dVL_for_DL
+from matplotlib.lines import Line2D
 
 from desi_aap.gracedb_tools import CREDIBLE_LEVEL, USE_COMOVING_VOLUME_RANKING, safe_file_part
 
