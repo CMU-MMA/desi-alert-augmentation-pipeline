@@ -94,16 +94,18 @@ def clean_tns_catalog(df):
         z == 0           0.0 Mpc  no crash; SN sits at the origin, credible level meaningless
         -1 < z < 0      negative   ValueError from SkyCoord in run_3d_spatial_crossmatch
         z == -1         -0.0 Mpc  no crash; -0.0 >= 0 in IEEE 754, so SkyCoord accepts it
-        z < -1                 -   TypeError from luminosity_distance, raised in this function
+        z < -1                 -   no usable distance; the row cannot survive, see below
 
-    That last row is where the cosmologies part company, and it is Planck18 that decides
-    it for the function as a whole, since every COSMOLOGIES entry is evaluated. Planck18
-    raises immediately below z = -1, its integrand going complex; the one exception is
-    z == -2 exactly, which raises ZeroDivisionError instead of TypeError. SHOES on its own
-    would not raise anywhere below -1: it returns a positive, unphysical distance down to
-    about z = -2.4 and NaN below that, which dropna would then remove. So a catalog carrying
-    any z < -1 aborts this function today, and would silently keep or drop those rows if
-    Planck18 were ever dropped from COSMOLOGIES.
+    That last row is where the cosmologies part company, and it is Planck18 that decides it
+    for the function as a whole, since every COSMOLOGIES entry is evaluated. What Planck18
+    does below z = -1 depends on the astropy version: on 7.1.1 its integrand goes complex
+    and luminosity_distance raises TypeError, aborting this function, while on 5.3 it
+    returns NaN and the row is instead dropped by the distance cut, NaN < MAX comparing
+    False. Both versions raise ZeroDivisionError at z == -2 exactly. SHOES never raises
+    anywhere below -1 on either: it returns a positive, unphysical distance down to about
+    z = -2.4 and NaN below that. So such a row is either fatal or filtered, never returned,
+    but it would be silently kept at a meaningless distance if Planck18 were ever dropped
+    from COSMOLOGIES.
 
     Examples
     --------

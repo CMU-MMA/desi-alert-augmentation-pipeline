@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from astropy import units as u
+
 from desi_aap import tns_catalog
 from desi_aap.cosmology import COSMOLOGIES
 
@@ -256,11 +257,18 @@ def test_clean_tns_catalog_keeps_blueshifted_hosts() -> None:
         assert cleaned[f"dist_mpc_{label}"].iloc[0] < 0
 
 
-def test_clean_tns_catalog_raises_on_deeply_negative_redshifts() -> None:
-    """Verify a z below -1 can raise out of luminosity_distance rather than being filtered
+def test_clean_tns_catalog_never_returns_a_deeply_negative_redshift() -> None:
+    """Verify a z below -1 never comes back as an ordinary row
 
-    Which cosmology raises, and where, is not uniform: Planck18 raises for the whole
-    -2 < z < -1 band while SHOES returns a positive, meaningless distance across it.
+    How it fails is astropy-version-dependent, so this asserts only that it does. On
+    astropy 7.1.1 Planck18's integrand goes complex below z = -1 and luminosity_distance
+    raises TypeError, aborting the whole call; on astropy 5.3 it returns NaN instead, and
+    the row is then removed by the distance cut, since NaN < MAX compares False. Either is
+    acceptable. Silently returning a row with a plausible-looking distance is not, which is
+    the real risk: SHOES gives z = -1.2 a finite 1132 Mpc on both versions.
     """
-    with pytest.raises(TypeError):
-        tns_catalog.clean_tns_catalog(make_tns_frame([{"redshift": -1.2}]))
+    try:
+        cleaned = tns_catalog.clean_tns_catalog(make_tns_frame([{"redshift": -1.2}]))
+    except (TypeError, ZeroDivisionError):
+        return
+    assert cleaned.empty
