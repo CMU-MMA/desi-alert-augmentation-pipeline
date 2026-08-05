@@ -323,16 +323,8 @@ def test_skymap_priority_ignores_non_skymaps() -> None:
     assert gracedb_tools.skymap_priority("coinc.xml") >= gracedb_tools.SKYMAP_PRIORITY_IGNORE
 
 
-@pytest.mark.xfail(strict=True, reason="versioned names fail the extension check and rank as IGNORE")
 def test_skymap_priority_ranks_versioned_names_below_unversioned() -> None:
-    """Verify `skymap_priority` gives a ",N" revision its base rank plus the version penalty
-
-    This is the behavior skymap_priority documents, not the behavior it has. GraceDB
-    versions files as "bayestar.multiorder.fits,0", so the suffix follows the extension and
-    the endswith check rejects the name before the penalty is ever applied, leaving every
-    revision at SKYMAP_PRIORITY_IGNORE + SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY. Stripping
-    the suffix before the extension check makes this pass.
-    """
+    """Verify `skymap_priority` gives a ",N" revision its base rank plus the version penalty"""
     penalty = gracedb_tools.SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY
     assert gracedb_tools.skymap_priority("bilby.multiorder.fits,0") == (
         gracedb_tools.SKYMAP_PRIORITY_BILBY_MULTIORDER + penalty
@@ -343,15 +335,8 @@ def test_skymap_priority_ranks_versioned_names_below_unversioned() -> None:
     assert gracedb_tools.skymap_priority("bilby.multiorder.fits,0") < gracedb_tools.SKYMAP_PRIORITY_IGNORE
 
 
-@pytest.mark.xfail(strict=True, reason="versioned names fail the extension check and rank as IGNORE")
 def test_choose_skymap_file_falls_back_to_a_versioned_skymap() -> None:
-    """Verify `choose_skymap_file` uses a ",N" revision when it is the only skymap available
-
-    Documented behavior, not current behavior; see
-    test_skymap_priority_ranks_versioned_names_below_unversioned. Today such a superevent
-    is treated as having no skymap at all, so it reaches the spatial crossmatch with
-    spatial_status "missing_skymap".
-    """
+    """Verify `choose_skymap_file` uses a ",N" revision when it is the only skymap available"""
     files = ["p_astro.json", "bayestar.multiorder.fits,0"]
     assert gracedb_tools.choose_skymap_file(files) == "bayestar.multiorder.fits,0"
 
