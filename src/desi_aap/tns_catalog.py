@@ -78,8 +78,24 @@ def clean_tns_catalog(df):
 
     Notes
     -----
-    Redshift is taken as published, so an object recorded with z <= 0 gets a distance of
-    zero or below. That passes the distance cut, so such rows survive into the result. # TODO check
+    # TODO: Check the following with Xander.
+
+    Redshift is taken as published and is not required to be positive. TNS carries z = 0
+    where no redshift was measured, and genuinely negative z for very nearby hosts whose
+    peculiar velocity outruns the Hubble flow. Neither is filtered here, so the result can
+    carry distances of zero or below, which are not meaningful as luminosity distances.
+
+    The regimes do not degrade uniformly. Realistically blueshifted hosts land near
+    z = -0.001, inside the only band that raises from run_3d_spatial_crossmatch::
+
+        redshift        distance  outcome
+        -------------  ---------  ----------------------------------------------------------
+        z > 0           positive  fine
+        z == 0           0.0 Mpc  no crash; SN sits at the origin, credible level meaningless
+        -1 < z < 0      negative   ValueError from SkyCoord in run_3d_spatial_crossmatch
+        z == -1         -0.0 Mpc  no crash; -0.0 >= 0 in IEEE 754, so SkyCoord accepts it
+        -1.5 < z < -1   positive   no crash, but the distance is not physical
+        z <= -1.5              -   TypeError from luminosity_distance, raised in this function
 
     Examples
     --------
@@ -108,11 +124,19 @@ def clean_tns_catalog(df):
     for label, cosmo in COSMOLOGIES.items():
         dist_col = f"dist_mpc_{label}"
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)  # TODO if possible, note why this is here.
+            # Defensive, and possibly vestigial: on astropy 7.1.1 no RuntimeWarning could be
+            # provoked from luminosity_distance at any redshift tried, positive, zero,
+            # negative or NaN. (z < -1 raises TypeError, which this would not catch anyway.)
+            warnings.simplefilter("ignore", RuntimeWarning)
             df[dist_col] = cosmo.luminosity_distance(df["redshift"].to_numpy()).to_value(u.Mpc)
 
     required = ["discoverydate", "redshift", "ra", "declination"]
     df = df.dropna(subset=required)
+    # TODO Check with Xander before enabling. Drops z <= 0, which dropna does not catch.
+    # z = 0 (no redshift measured) gives a 0 Mpc distance and z < 0 (genuinely blueshifted
+    # nearby host) gives a negative one. Both clear the distance cut below, and a negative
+    # one raises ValueError from SkyCoord in run_3d_spatial_crossmatch.
+    # df = df[df["redshift"] > 0]
     near = np.zeros(len(df), dtype=bool)
     for label in COSMOLOGIES:
         near |= df[f"dist_mpc_{label}"] < MAX_STRIPPED_ENVELOPE_DISTANCE_MPC

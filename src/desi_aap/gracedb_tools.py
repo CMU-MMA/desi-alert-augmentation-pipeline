@@ -214,6 +214,20 @@ def skymap_priority(name):
     which take a fixed SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY. Names that are not skymaps at
     all rank at SKYMAP_PRIORITY_IGNORE or above.
 
+    Versioned names are in practice not merely deprioritized but skipped outright. GraceDB
+    puts the revision suffix after the full file name, as in "bayestar.multiorder.fits,0",
+    so such a name fails the endswith check on the extension below and returns
+    SKYMAP_PRIORITY_IGNORE before any of the pipeline and format branches, and before the
+    penalty means anything. Every revision therefore lands above the ignore threshold and
+    choose_skymap_file never selects one; a superevent that has only versioned copies of its
+    skymap looks to the rest of the pipeline as though it has no skymap, and its SNe come
+    out of run_3d_spatial_crossmatch with spatial_status "missing_skymap". This is harmless
+    while GraceDB keeps publishing the unversioned alias alongside the revisions.
+    SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY is dead weight as long as this holds. Stripping
+    the suffix before the extension check is what would make the paragraph above true.
+
+    #TODO Check with Xander whether versioned skymaps should be usable fallbacks
+
     Parameters
     ----------
     name : str
@@ -325,6 +339,13 @@ def download_gracedb_file(client, superevent_id, filename, outdir=SKYMAP_DIR):
 def gps_to_utc(gps_time):
     """Convert a GPS time to a UTC timestamp, passing through NaN.
 
+    The .utc conversion is required, not cosmetic. An astropy Time built with
+    format="gps" is on the TAI scale, so calling .to_datetime() on it directly yields a
+    TAI datetime, which labeling as UTC leaves ahead by the accumulated leap seconds: 37 s
+    for O3-era events, so S190425z reads 08:18:42 rather than its true 08:18:05.
+
+    #TODO Check with Xander about the 37 s offset
+
     Parameters
     ----------
     gps_time : float
@@ -338,7 +359,7 @@ def gps_to_utc(gps_time):
     """
     if pd.isna(gps_time):
         return pd.NaT
-    return pd.Timestamp(Time(float(gps_time), format="gps").to_datetime(), tz="UTC")
+    return pd.Timestamp(Time(float(gps_time), format="gps").utc.to_datetime(), tz="UTC")
 
 
 def fetch_gracedb_superevents(se_types):
@@ -420,9 +441,14 @@ def fetch_gracedb_superevents(se_types):
         try:
             files = client.files(sid).json()
         except Exception as exc:
+            # gw_time is set explicitly because it is the sort key below. Without it, a
+            # scan whose superevents all fail here builds a frame with no gw_time column
+            # at all and the sort raises KeyError; a stub alongside a normal row only
+            # works because pandas fills the column in for it.
             rows.append(
                 {
                     "superevent_id": sid,
+                    "gw_time": pd.NaT,
                     "status": f"file_list_failed: {exc}",
                     "far_hz": far_hz,
                     "far_per_year": far_per_year,
