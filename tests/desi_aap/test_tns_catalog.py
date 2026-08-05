@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from astropy import units as u
-
 from desi_aap import tns_catalog
 from desi_aap.cosmology import COSMOLOGIES
 

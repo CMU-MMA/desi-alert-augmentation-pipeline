@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from astropy.table import Table
-
 from desi_aap import skymap_plots
 
 # Every test rasterizes at this order rather than the module defaults. raster_3d_density_slice
