@@ -323,12 +323,10 @@ def download_gracedb_file(client, superevent_id, filename, outdir=SKYMAP_DIR):
 def gps_to_utc(gps_time):
     """Convert a GPS time to a UTC timestamp, passing through NaN.
 
-    The .utc conversion is required, not cosmetic. An astropy Time built with
-    format="gps" is on the TAI scale, so calling .to_datetime() on it directly yields a
-    TAI datetime, which labeling as UTC leaves ahead by the accumulated leap seconds: 37 s
-    for O3-era events, so S190425z reads 08:18:42 rather than its true 08:18:05.
-
-    #TODO Check with Xander about the 37 s offset
+    The .utc conversion is required: an astropy Time built with format="gps" is
+    on the TAI scale, so calling .to_datetime() on it directly yields a TAI datetime,
+    which labeling as UTC leaves ahead by the accumulated leap seconds: 37 s for
+    O3-era events, so S190425z reads 08:18:42 rather than its true 08:18:05.
 
     Parameters
     ----------
