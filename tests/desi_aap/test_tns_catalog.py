@@ -232,48 +232,62 @@ def test_clean_tns_catalog_requires_its_columns() -> None:
         tns_catalog.clean_tns_catalog(df)
 
 
-def test_clean_tns_catalog_keeps_unmeasured_redshifts() -> None:
-    """Verify `clean_tns_catalog` passes z = 0 through, as its Notes describe
+def test_clean_tns_catalog_drops_non_positive_redshifts() -> None:
+    """Verify `clean_tns_catalog` drops every kind of non-positive redshift in one pass
 
-    TNS carries z = 0 where no redshift was measured. Neither the dropna nor the distance
-    cut removes it, so the object survives at 0 Mpc, and its credible level downstream is
-    meaningless rather than absent. Documented as an open question for Xander.
+    Each row below is a distinct failure the floor exists to prevent, and all of them are
+    checked together because the interesting property is that the healthy rows survive
+    alongside them: a single unusable redshift must not take the rest of the catalog with it.
+
+    The two healthy rows sit at different redshifts, interleaved with the bad ones, so the
+    survivors reach the cosmology loop with a gappy index [0, 3]. The distance assertion
+    below therefore catches distances aligned to the pre-filter rows.
     """
-    cleaned = tns_catalog.clean_tns_catalog(make_tns_frame([{"name": "no-z", "redshift": 0.0}]))
+    df = make_tns_frame(
+        [
+            # Healthy control (1/2): Everything else in this frame must be dropped around the controls.
+            {"name": "measured", "redshift": NEARBY_Z},
+            # Zero distance, so no meaningful credible level downstream. Nothing else in the
+            # function removes it: it passes dropna and clears the distance cut at 0 Mpc.
+            {"name": "zero", "redshift": 0.0},
+            # A real blueshift, where nearby peculiar velocity outruns the Hubble flow. This
+            # is the one that bites in practice: it yields a negative distance, which if allowed
+            # to reach run_3d_spatial_crossmatch would raise ValueError out of SkyCoord.
+            {"name": "blueshifted", "redshift": -0.001},
+            # Healthy control (2/2)
+            {"name": "also-measured", "redshift": SPLIT_Z},
+            # Below -1 the floor has to act early. Left to reach luminosity_distance, this
+            # aborts the whole call on astropy 7.1.1, where Planck18's integrand goes complex
+            # and raises TypeError, so a filter placed after the cosmology loop is too late.
+            {"name": "deeply-negative", "redshift": -1.2},
+            # z == -2 exactly is its own case: ZeroDivisionError rather than TypeError.
+            {"name": "at-minus-two", "redshift": -2.0},
+        ]
+    )
 
-    assert cleaned["name"].tolist() == ["no-z"]
+    cleaned = tns_catalog.clean_tns_catalog(df)
+
+    assert cleaned["name"].tolist() == ["measured", "also-measured"]
     for label in COSMOLOGIES:
-        assert cleaned[f"dist_mpc_{label}"].iloc[0] == 0.0
+        assert cleaned[f"dist_mpc_{label}"].tolist() == pytest.approx(
+            [luminosity_distance(NEARBY_Z, label), luminosity_distance(SPLIT_Z, label)]
+        )
 
 
-def test_clean_tns_catalog_keeps_blueshifted_hosts() -> None:
-    """Verify `clean_tns_catalog` passes a small negative z through as a negative distance
+@pytest.mark.parametrize(
+    "redshift,kept",
+    [
+        (tns_catalog.MIN_REDSHIFT, True),
+        (tns_catalog.MIN_REDSHIFT * 1.01, True),
+        (tns_catalog.MIN_REDSHIFT * 0.99, False),
+    ],
+    ids=["at_floor", "just_above", "just_below"],
+)
+def test_clean_tns_catalog_applies_the_redshift_floor(redshift, kept) -> None:
+    """Verify MIN_REDSHIFT is the smallest redshift kept, that is, that the floor is inclusive"""
+    cleaned = tns_catalog.clean_tns_catalog(make_tns_frame([{"name": "sn", "redshift": redshift}]))
 
-    The other half of the same open question. A negative distance clears the cut here and
-    then raises ValueError out of SkyCoord in run_3d_spatial_crossmatch.
-    """
-    cleaned = tns_catalog.clean_tns_catalog(make_tns_frame([{"name": "blue", "redshift": -0.001}]))
-
-    assert cleaned["name"].tolist() == ["blue"]
-    for label in COSMOLOGIES:
-        assert cleaned[f"dist_mpc_{label}"].iloc[0] < 0
-
-
-def test_clean_tns_catalog_never_returns_a_deeply_negative_redshift() -> None:
-    """Verify a z below -1 never comes back as an ordinary row
-
-    How it fails is astropy-version-dependent, so this asserts only that it does. On
-    astropy 7.1.1 Planck18's integrand goes complex below z = -1 and luminosity_distance
-    raises TypeError, aborting the whole call; on astropy 5.3 it returns NaN instead, and
-    the row is then removed by the distance cut, since NaN < MAX compares False. Either is
-    acceptable. Silently returning a row with a plausible-looking distance is not, which is
-    the real risk: SHOES gives z = -1.2 a finite 1132 Mpc on both versions.
-    """
-    try:
-        cleaned = tns_catalog.clean_tns_catalog(make_tns_frame([{"redshift": -1.2}]))
-    except (TypeError, ZeroDivisionError):
-        return
-    assert cleaned.empty
+    assert cleaned["name"].tolist() == (["sn"] if kept else [])
 
 
 CREDENTIAL_ENV_NAMES = (

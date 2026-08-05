@@ -6,7 +6,6 @@ credentials are read from the environment; see tns_credentials.
 """
 
 import os
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -30,6 +29,9 @@ STRIPPED_ENVELOPE_TYPE_REGEX = (
     "Ib|Ic|IIb"  # TODO: Claude notes that this also matches SLSN-1c, which may not be desired. Check.
 )
 MAX_STRIPPED_ENVELOPE_DISTANCE_MPC = 500
+# Smallest redshift treated as a real measurement. Roughly 0.9 Mpc under either
+# cosmology, so it excludes the Local Group along with the z <= 0 placeholders.
+MIN_REDSHIFT = 0.0002
 
 
 def tns_credentials():
@@ -115,9 +117,10 @@ def download_tns_table():
 def clean_tns_catalog(df):
     """Filter a raw TNS catalog dataframe down to nearby stripped-envelope supernovae.
 
-    Keeps objects whose TNS type matches STRIPPED_ENVELOPE_TYPE_REGEX, adds a luminosity
-    distance for every cosmology in COSMOLOGIES, and keeps those closer than
-    MAX_STRIPPED_ENVELOPE_DISTANCE_MPC under at least one of them.
+    Keeps objects whose TNS type matches STRIPPED_ENVELOPE_TYPE_REGEX and whose redshift is
+    at least MIN_REDSHIFT, adds a luminosity distance for every cosmology in COSMOLOGIES,
+    and keeps those closer than MAX_STRIPPED_ENVELOPE_DISTANCE_MPC under at least one of
+    them.
 
     Parameters
     ----------
@@ -136,34 +139,34 @@ def clean_tns_catalog(df):
 
     Notes
     -----
-    # TODO: Check the following with Xander.
+    Redshift is floored at MIN_REDSHIFT rather than taken as published, because neither of
+    the two ways a catalog redshift can be non-positive yields a meaningful luminosity
+    distance. A z of exactly 0 places an extragalactic transient at zero distance, which is
+    not a measurement however it arose. A negative z is a genuine blueshift, which happens
+    for very nearby hosts whose peculiar velocity outruns the Hubble flow, but is not a
+    distance either. The floor is applied before the cosmology loop, so neither kind of row
+    reaches astropy at all.
 
-    Redshift is taken as published and is not required to be positive. TNS carries z = 0
-    where no redshift was measured, and genuinely negative z for very nearby hosts whose
-    peculiar velocity outruns the Hubble flow. Neither is filtered here, so the result can
-    carry distances of zero or below, which are not meaningful as luminosity distances.
+    How TNS represents an unmeasured redshift does not matter here, which is why it is not
+    documented above: an explicit 0 fails the floor comparison directly, and a blank becomes
+    NaN under pd.to_numeric, which fails every comparison and so is dropped at the same line.
+    Both spellings leave by the same door. This was worth knowing only before the floor
+    existed, when a 0 survived to the output and a NaN did not.
 
-    The regimes do not degrade uniformly. Realistically blueshifted hosts land near
-    z = -0.001, inside the only band that raises from run_3d_spatial_crossmatch::
+    It is not a cosmetic cut. Without it the failure modes are uneven, and the one that
+    matters is reachable in practice, since realistically blueshifted hosts land near
+    z = -0.001, inside the band that raises::
 
-        redshift        distance  outcome
+        redshift        distance  outcome if the floor were removed
         -------------  ---------  ----------------------------------------------------------
-        z > 0           positive  fine
         z == 0           0.0 Mpc  no crash; SN sits at the origin, credible level meaningless
         -1 < z < 0      negative   ValueError from SkyCoord in run_3d_spatial_crossmatch
         z == -1         -0.0 Mpc  no crash; -0.0 >= 0 in IEEE 754, so SkyCoord accepts it
-        z < -1                 -   no usable distance; the row cannot survive, see below
+        z < -1                 -   Planck18 raises TypeError on astropy 7.1.1, returns NaN
+                                   on 5.3, and raises ZeroDivisionError at z == -2 on both
 
-    That last row is where the cosmologies part company, and it is Planck18 that decides it
-    for the function as a whole, since every COSMOLOGIES entry is evaluated. What Planck18
-    does below z = -1 depends on the astropy version: on 7.1.1 its integrand goes complex
-    and luminosity_distance raises TypeError, aborting this function, while on 5.3 it
-    returns NaN and the row is instead dropped by the distance cut, NaN < MAX comparing
-    False. Both versions raise ZeroDivisionError at z == -2 exactly. SHOES never raises
-    anywhere below -1 on either: it returns a positive, unphysical distance down to about
-    z = -2.4 and NaN below that. So such a row is either fatal or filtered, never returned,
-    but it would be silently kept at a meaningless distance if Planck18 were ever dropped
-    from COSMOLOGIES.
+    A NaN redshift, left by a value pd.to_numeric could not parse, also fails the floor
+    comparison, so it is dropped there rather than by the dropna further down.
 
     Examples
     --------
@@ -188,6 +191,10 @@ def clean_tns_catalog(df):
     df["redshift"] = pd.to_numeric(df["redshift"], errors="coerce")
     df["ra"] = pd.to_numeric(df["ra"], errors="coerce")
     df["declination"] = pd.to_numeric(df["declination"], errors="coerce")
+    # Ahead of the cosmology loop rather than alongside the other cuts below, so that the
+    # redshifts with no usable luminosity distance never reach astropy. NaN fails this
+    # comparison too, so an unparseable redshift is dropped here.
+    df = df[df["redshift"] >= MIN_REDSHIFT]
 
     for label, cosmo in COSMOLOGIES.items():
         dist_col = f"dist_mpc_{label}"
@@ -199,16 +206,7 @@ def clean_tns_catalog(df):
             # from raising ValueError out of this loop.
             df[dist_col] = np.array([], dtype=float)
             continue
-        with warnings.catch_warnings():
-            # Live, but only in one corner: on astropy 7.1.1 the only RuntimeWarning
-            # luminosity_distance could be provoked into raising is SHOES below about
-            # z = -2.4, where the comoving-distance integral fails and returns NaN. Note
-            # that scipy's IntegrationWarning, emitted alongside it there, is a UserWarning
-            # and passes straight through this filter, and that Planck18 raises TypeError
-            # anywhere below z = -1, which this would not catch either.
-            # TODO Check with Xander.
-            warnings.simplefilter("ignore", RuntimeWarning)
-            df[dist_col] = cosmo.luminosity_distance(df["redshift"].to_numpy()).to_value(u.Mpc)
+        df[dist_col] = cosmo.luminosity_distance(df["redshift"].to_numpy()).to_value(u.Mpc)
 
     required = ["discoverydate", "redshift", "ra", "declination"]
     df = df.dropna(subset=required)
