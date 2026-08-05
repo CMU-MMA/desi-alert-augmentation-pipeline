@@ -5,20 +5,6 @@ SN marked and the crossmatch numbers summarized alongside, and writes it to PLOT
 """
 
 """
-Where Claude was assuming most, in order:
-
-raster_3d_density_slice — the physics. This is by far the biggest leap. I kept your original summary line
-verbatim and described the two return values by their role rather than asserting physical units. Specifically
-I say density_at_distance is "per-pixel posterior density at dl_mpc, directly comparable against
-density_threshold" — because the contract I'm confident about is that the two are comparable, since the caller
-thresholds one against the other. Reading the math, it looks like probability per unit volume with the r²
-absorbed, divided by dVC_dVL_for_DL for comoving ranking — but I deliberately did not write that, because it's
-my reconstruction of the ansatz, not something the code states. If you know the intended normalization, that
-sentence is the one to correct.
-
-raster_prob_from_moc returning nested ordering. Inferred, not stated. Supported by moc.rasterize semantics and
-by every downstream call passing nest=True, so I'm fairly confident — but the function itself never says so.
-
 draw_contours returning False. I wrote "the 3D slice was unavailable and only the 2D contour was drawn."
 That's what the code does, but since nothing calls it, that return contract has never actually been exercised.
 """
@@ -40,6 +26,7 @@ from pathlib import Path
 import numpy as np
 import healpy as hp
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from ligo.skymap.io import read_sky_map
 from ligo.skymap import distance, moc
 from ligo.skymap.postprocess import contour, find_greedy_credible_levels
@@ -51,7 +38,7 @@ from desi_aap.gracedb_tools import CREDIBLE_LEVEL, USE_COMOVING_VOLUME_RANKING, 
 PLOT_DIR = Path("gracedb_sesn_3d_plots")
 
 # Plot/raster settings.
-PLOT_OUTPUT_FORMAT = "pdf"
+PLOT_OUTPUT_FORMAT = "png"  # "pdf"
 PLOT_HEALPIX_ORDER = 8
 PLOT_FIGSIZE = (12, 8.5)
 PLOT_MARGINS = (0.02, 0.04, 0.02, 0.12)
@@ -65,6 +52,12 @@ DISTANCE_GRID_DISTMEAN_MULTIPLIER = 6.0
 DISTANCE_GRID_SN_DISTANCE_MULTIPLIER = 1.05
 DISTANCE_SHELL_VARIANCE_DENOMINATOR = 12.0
 GAUSSIAN_EXPONENT_FACTOR = -0.5
+
+# HEALPix order for the projected 3D contour, deliberately coarser than PLOT_HEALPIX_ORDER.
+# raster_3d_density_slice allocates several (npix, DISTANCE_GRID_SIZE) float64 grids, so cost
+# rises 4x per order: order 6 needs a few GB, order 8 would need roughly 31 GB. Contours are
+# smooth enough that the coarser grid costs little in the drawn result.
+CONTOUR_HEALPIX_ORDER = 6
 
 # Contour and marker styling.
 PLOT_2D_CONTOUR_COLOR = "white"
@@ -81,6 +74,15 @@ SN_MARKER_COLOR = "crimson"
 SN_MARKER_EDGE_COLOR = "white"
 SN_MARKER_EDGE_WIDTH = 0.9
 SN_MARKER_ZORDER = 10
+
+# Contour colour-key styling. Its face is dark so the white 2D swatch stays visible.
+COLOR_KEY_LOCATION = "upper left"
+COLOR_KEY_FONT_SIZE = 8.5
+COLOR_KEY_FACE_COLOR = "0.15"
+COLOR_KEY_EDGE_COLOR = "black"
+COLOR_KEY_TEXT_COLOR = "white"
+COLOR_KEY_ALPHA = 0.85
+COLOR_KEY_SWATCH_LENGTH = 2.6
 
 # Plot legend box styling.
 LEGEND_X = 0.035
@@ -129,11 +131,6 @@ def raster_prob_from_moc(skymap, order=PLOT_HEALPIX_ORDER):
 def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=PLOT_HEALPIX_ORDER):
     """Return an approximate projected 3D contour map at one distance.
 
-    Evaluates the skymap's 3D posterior across the sky at a single luminosity distance and
-    finds the density threshold enclosing contour_level of the total probability, so the
-    two can be handed straight to a contouring routine. Ranking follows
-    USE_COMOVING_VOLUME_RANKING, so the contour is comparable to the credible levels
-    reported by run_3d_spatial_crossmatch.
 
     Parameters
     ----------
@@ -225,7 +222,7 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=
     return density_at_distance, density_threshold
 
 
-def draw_contours(prob, skymap, row):
+def draw_contours(prob, skymap, row, order=CONTOUR_HEALPIX_ORDER):
     """Overlay the 2D and projected 3D credible contours on the current healpy plot.
 
     Draws into the active matplotlib figure through healpy's projection helpers, so a map
@@ -242,6 +239,9 @@ def draw_contours(prob, skymap, row):
     row : pandas.Series
         A row of the run_3d_spatial_crossmatch output. Only sn_dist_mpc is read, giving the
         distance the 3D contour is projected at.
+    order : int, optional
+        HEALPix order for the 3D slice. Defaults to CONTOUR_HEALPIX_ORDER, which is coarser
+        than the map itself because the slice grid's cost rises 4x per order.
 
     Returns
     -------
@@ -262,7 +262,9 @@ def draw_contours(prob, skymap, row):
                 alpha=PLOT_2D_CONTOUR_ALPHA,
             )
 
-    density_slice, density_threshold = raster_3d_density_slice(skymap, row["sn_dist_mpc"], CREDIBLE_LEVEL)
+    density_slice, density_threshold = raster_3d_density_slice(
+        skymap, row["sn_dist_mpc"], CREDIBLE_LEVEL, order=order
+    )
     if density_slice is None or not np.isfinite(density_threshold) or density_threshold <= 0:
         return False
 
@@ -282,7 +284,7 @@ def draw_contours(prob, skymap, row):
     return drew_3d
 
 
-def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR):
+def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False):
     """Render and save a Mollweide sky plot for one SN/GW coincidence.
 
     Plots the event's skymap probability, marks the SN, and annotates the figure with the
@@ -304,6 +306,10 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR):
     outdir : pathlib.Path, optional
         Directory to write into, created if it does not exist. Defaults to PLOT_DIR, which
         is relative to the working directory.
+    show : bool, optional
+        If True, leave the figure open so a notebook's inline backend renders it. The file
+        is written either way. Defaults to False, which closes the figure; leaving figures
+        open across many coincidences accumulates them in memory.
 
     Returns
     -------
@@ -331,7 +337,7 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR):
     )
     hp.graticule(color=PLOT_GRATICULE_COLOR, alpha=PLOT_GRATICULE_ALPHA)
 
-    drew_3d = False
+    drew_3d = draw_contours(prob, skymap, row)
 
     hp.projscatter(
         row["ra"],
@@ -346,17 +352,48 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR):
         zorder=SN_MARKER_ZORDER,
     )
 
-    contour_note = (
-        f"{PLOT_2D_CONTOUR_COLOR}: 2D {PLOT_PERCENT_SCALE * CREDIBLE_LEVEL:.0f}%; "
-        f"{PLOT_3D_CONTOUR_COLOR}: projected 3D density-rank "
-        f"{PLOT_PERCENT_SCALE * CREDIBLE_LEVEL:.0f}% at SN distance"
+    percent = PLOT_PERCENT_SCALE * CREDIBLE_LEVEL
+    three_d_label = (
+        f"3D density-rank {percent:.0f}% at {row['sn_dist_mpc']:.0f} Mpc"
+        if drew_3d
+        else f"3D density-rank {percent:.0f}% (unavailable for this slice)"
     )
-    if not drew_3d:
-        contour_note = (
-            f"{PLOT_2D_CONTOUR_COLOR}: 2D {PLOT_PERCENT_SCALE * CREDIBLE_LEVEL:.0f}%; "
-            f"{PLOT_3D_CONTOUR_COLOR}: projected 3D density-rank "
-            f"{PLOT_PERCENT_SCALE * CREDIBLE_LEVEL:.0f}% unavailable for this slice"
-        )
+    color_key = fig.legend(
+        handles=[
+            Line2D(
+                [],
+                [],
+                color=PLOT_2D_CONTOUR_COLOR,
+                linewidth=PLOT_2D_CONTOUR_LINEWIDTH,
+                label=f"2D sky {percent:.0f}%",
+            ),
+            Line2D(
+                [],
+                [],
+                color=PLOT_3D_CONTOUR_COLOR,
+                linewidth=PLOT_3D_CONTOUR_LINEWIDTH,
+                label=three_d_label,
+            ),
+            Line2D(
+                [],
+                [],
+                linestyle="none",
+                marker=SN_MARKER,
+                markerfacecolor=SN_MARKER_COLOR,
+                markeredgecolor=SN_MARKER_EDGE_COLOR,
+                markeredgewidth=SN_MARKER_EDGE_WIDTH,
+                label=row["name"],
+            ),
+        ],
+        loc=COLOR_KEY_LOCATION,
+        fontsize=COLOR_KEY_FONT_SIZE,
+        facecolor=COLOR_KEY_FACE_COLOR,
+        edgecolor=COLOR_KEY_EDGE_COLOR,
+        framealpha=COLOR_KEY_ALPHA,
+        labelcolor=COLOR_KEY_TEXT_COLOR,
+        handlelength=COLOR_KEY_SWATCH_LENGTH,
+    )
+    color_key.get_frame().set_linewidth(LEGEND_LINEWIDTH)
 
     legend_text = (
         f"delay = {row['days_from_gw']:+.2f} d\n"
@@ -367,8 +404,7 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR):
         f"3D density-rank = {row['searched_prob_3d_density_rank']:.3f}\n"
         f"distance CDF = {row['searched_prob_dist']:.3f}\n"
         f"credible area = {row['credible_area_deg2']:.1f} deg^2\n"
-        f"credible 3D volume = {row['credible_volume_mpc3']:.3g} Mpc^3\n"
-        f"{contour_note}"
+        f"credible 3D volume = {row['credible_volume_mpc3']:.3g} Mpc^3"
     )
     fig.text(
         LEGEND_X,
@@ -393,5 +429,6 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR):
     )
     path = outdir / filename
     fig.savefig(path, bbox_inches=PLOT_BBOX_INCHES)
-    plt.close(fig)
+    if not show:
+        plt.close(fig)
     return path
