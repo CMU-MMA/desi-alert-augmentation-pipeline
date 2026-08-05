@@ -1,9 +1,11 @@
 """Download and filter the TNS public catalog for stripped-envelope supernovae (SESN).
 
 The Transient Name Server publishes its whole public object catalog as a zipped CSV that is
-regenerated daily after UT midnight. Downloading it requires a registered TNS bot.
+regenerated daily after UT midnight. Downloading it requires a registered TNS bot, whose
+credentials are read from the environment; see tns_credentials.
 """
 
+import os
 import warnings
 
 import numpy as np
@@ -13,10 +15,15 @@ from astropy import units as u
 
 from desi_aap.cosmology import COSMOLOGIES
 
+# Names of the environment variables holding the TNS bot credentials. They are read at call
+# time rather than at import, so the package imports fine without them and only
+# download_tns_table requires them to be set. In CI they come from repository secrets of the
+# same names; locally, export them in the shell or notebook kernel first.
+TNS_API_KEY_ENV = "TNS_API_KEY"
+TNS_BOT_ID_ENV = "TNS_BOT_ID"
+TNS_BOT_NAME_ENV = "TNS_BOT_NAME"
+
 # TNS settings copied from the existing workflow.
-TNS_API_KEY = "174094777967c4c1438cdfd6.00935564"
-TNS_BOT_NAME = "DESIRT_Bot"
-TNS_BOT_ID = 105220
 CATALOG_URL = "https://www.wis-tns.org/system/files/tns_public_objects/tns_public_objects.csv.zip"
 TNS_CSV_SKIPROWS = 1
 STRIPPED_ENVELOPE_TYPE_REGEX = (
@@ -25,12 +32,60 @@ STRIPPED_ENVELOPE_TYPE_REGEX = (
 MAX_STRIPPED_ENVELOPE_DISTANCE_MPC = 500
 
 
+def tns_credentials():
+    """Read the TNS bot credentials from the environment.
+
+    Kept separate from download_tns_table so the "are we configured?" check can be made
+    without issuing a request, and so a misconfiguration reports which variable is at fault
+    rather than surfacing as an opaque HTTP error from TNS.
+
+    Returns
+    -------
+    api_key : str
+        Value of $TNS_API_KEY.
+    bot_id : str
+        Value of $TNS_BOT_ID, validated as an integer but returned as a string, which is how
+        it is embedded in the tns_marker user-agent.
+    bot_name : str
+        Value of $TNS_BOT_NAME.
+
+    Raises
+    ------
+    RuntimeError
+        If any of the three variables is unset or empty, or if $TNS_BOT_ID is not an
+        integer. The latter most often means two of the values were swapped.
+    """
+    names = (TNS_API_KEY_ENV, TNS_BOT_ID_ENV, TNS_BOT_NAME_ENV)
+    values = {name: (os.environ.get(name) or "").strip() for name in names}
+
+    missing = [name for name in names if not values[name]]
+    if missing:
+        raise RuntimeError(
+            f"TNS bot credentials are not configured: {', '.join(missing)} "
+            f"{'is' if len(missing) == 1 else 'are'} unset or empty. Set "
+            f"{', '.join(names)} in the environment; in CI they come from the repository "
+            "secrets of the same names."
+        )
+
+    bot_id = values[TNS_BOT_ID_ENV]
+    try:
+        int(bot_id)
+    except ValueError:
+        raise RuntimeError(
+            f"{TNS_BOT_ID_ENV} must be an integer TNS bot id, got {bot_id!r}. Check that "
+            f"{TNS_BOT_ID_ENV} and {TNS_BOT_NAME_ENV} are not swapped."
+        ) from None
+
+    return values[TNS_API_KEY_ENV], bot_id, values[TNS_BOT_NAME_ENV]
+
+
 def download_tns_table():
     """Download the zipped TNS public objects CSV and return its raw bytes.
 
-    TNS requires a registered bot: the request carries a tns_marker user-agent naming
-    TNS_BOT_ID and TNS_BOT_NAME, and posts TNS_API_KEY. The catalog is regenerated daily
-    after UT midnight, so repeat calls within a day fetch the same snapshot.
+    TNS requires a registered bot: the request carries a tns_marker user-agent naming the
+    bot id and name, and posts the API key. All three come from the environment via
+    tns_credentials. The catalog is regenerated daily after UT midnight, so repeat calls
+    within a day fetch the same snapshot.
 
     Returns
     -------
@@ -41,14 +96,17 @@ def download_tns_table():
 
     Raises
     ------
+    RuntimeError
+        If the TNS bot credentials are not configured; see tns_credentials.
     requests.HTTPError
-        If TNS rejects the request, for instance on a missing or invalid API key.
+        If TNS rejects the request, for instance on an invalid API key.
     """
-    user_agent = f'tns_marker{{"tns_id":"{TNS_BOT_ID}","type":"bot","name":"{TNS_BOT_NAME}"}}'
+    api_key, bot_id, bot_name = tns_credentials()
+    user_agent = f'tns_marker{{"tns_id":"{bot_id}","type":"bot","name":"{bot_name}"}}'
     with requests.post(
         CATALOG_URL,
         headers={"user-agent": user_agent},
-        data={"api_key": (None, TNS_API_KEY)},
+        data={"api_key": (None, api_key)},
     ) as response:
         response.raise_for_status()
         return response.content

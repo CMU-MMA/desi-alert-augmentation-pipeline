@@ -39,5 +39,9 @@ jobs:
       run: |
         pip list
     - name: Run unit tests with pytest
+      env:
+        TNS_API_KEY: ${{ secrets.TNS_API_KEY }}
+        TNS_BOT_ID: ${{ secrets.TNS_BOT_ID }}
+        TNS_BOT_NAME: ${{ secrets.TNS_BOT_NAME }}
       run: |
         python -m pytest

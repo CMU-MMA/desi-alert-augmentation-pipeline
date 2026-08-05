@@ -1,6 +1,9 @@
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
+import requests
 from astropy import units as u
 from desi_aap import tns_catalog
 from desi_aap.cosmology import COSMOLOGIES
@@ -271,3 +274,127 @@ def test_clean_tns_catalog_never_returns_a_deeply_negative_redshift() -> None:
     except (TypeError, ZeroDivisionError):
         return
     assert cleaned.empty
+
+
+CREDENTIAL_ENV_NAMES = (
+    tns_catalog.TNS_API_KEY_ENV,
+    tns_catalog.TNS_BOT_ID_ENV,
+    tns_catalog.TNS_BOT_NAME_ENV,
+)
+
+
+class FakeResponse:
+    """Stand-in for the requests.Response that requests.post returns."""
+
+    def __init__(self, content=b"zip-bytes", error=None):
+        self.content = content
+        self.error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def raise_for_status(self):
+        """Raise the configured error, mirroring a 4xx/5xx from TNS."""
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.fixture
+def tns_env(monkeypatch):
+    """Set the three TNS credential variables to known test values.
+
+    Also isolates the tests from a developer's real exported credentials, so a machine with
+    a live bot configured behaves the same as CI.
+    """
+    monkeypatch.setenv(tns_catalog.TNS_API_KEY_ENV, "test-key")
+    monkeypatch.setenv(tns_catalog.TNS_BOT_ID_ENV, "424242")
+    monkeypatch.setenv(tns_catalog.TNS_BOT_NAME_ENV, "TestBot")
+
+
+def install_fake_post(monkeypatch, response=None):
+    """Point requests.post at a fake and record the arguments download_tns_table passes."""
+    calls = []
+
+    def fake_post(url, headers=None, data=None):
+        calls.append({"url": url, "headers": headers, "data": data})
+        return FakeResponse() if response is None else response
+
+    monkeypatch.setattr(tns_catalog.requests, "post", fake_post)
+    return calls
+
+
+def test_tns_credentials_reads_the_environment(tns_env) -> None:
+    """Verify `tns_credentials` returns the three variables, with the bot id as a string"""
+    assert tns_catalog.tns_credentials() == ("test-key", "424242", "TestBot")
+
+
+@pytest.mark.parametrize("name", CREDENTIAL_ENV_NAMES)
+def test_tns_credentials_names_the_missing_variable(monkeypatch, tns_env, name) -> None:
+    """Verify `tns_credentials` reports which variable is unset rather than failing opaquely"""
+    monkeypatch.delenv(name, raising=False)
+    with pytest.raises(RuntimeError, match=name):
+        tns_catalog.tns_credentials()
+
+
+def test_tns_credentials_rejects_a_blank_variable(monkeypatch, tns_env) -> None:
+    """Verify `tns_credentials` treats a whitespace-only value as unset
+
+    An empty GitHub secret expands to an empty string rather than being absent, so a
+    presence check alone would let it through to TNS as a 401.
+    """
+    monkeypatch.setenv(tns_catalog.TNS_API_KEY_ENV, "   ")
+    with pytest.raises(RuntimeError, match=tns_catalog.TNS_API_KEY_ENV):
+        tns_catalog.tns_credentials()
+
+
+def test_tns_credentials_strips_surrounding_whitespace(monkeypatch, tns_env) -> None:
+    """Verify `tns_credentials` strips a trailing newline, as a pasted secret often carries"""
+    monkeypatch.setenv(tns_catalog.TNS_API_KEY_ENV, "  test-key\n")
+    assert tns_catalog.tns_credentials()[0] == "test-key"
+
+
+def test_tns_credentials_rejects_a_non_integer_bot_id(monkeypatch, tns_env) -> None:
+    """Verify `tns_credentials` catches TNS_BOT_ID and TNS_BOT_NAME being swapped"""
+    monkeypatch.setenv(tns_catalog.TNS_BOT_ID_ENV, "NotAnId")
+    with pytest.raises(RuntimeError, match="swapped"):
+        tns_catalog.tns_credentials()
+
+
+def test_download_tns_table_sends_the_bot_marker(monkeypatch, tns_env) -> None:
+    """Verify `download_tns_table` posts the API key under a well-formed tns_marker header"""
+    calls = install_fake_post(monkeypatch)
+
+    assert tns_catalog.download_tns_table() == b"zip-bytes"
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == tns_catalog.CATALOG_URL
+    marker = calls[0]["headers"]["user-agent"]
+    assert marker.startswith("tns_marker")
+    assert json.loads(marker.removeprefix("tns_marker")) == {
+        "tns_id": "424242",
+        "type": "bot",
+        "name": "TestBot",
+    }
+    assert calls[0]["data"] == {"api_key": (None, "test-key")}
+
+
+def test_download_tns_table_does_not_request_without_credentials(monkeypatch) -> None:
+    """Verify `download_tns_table` fails before issuing a request when unconfigured"""
+    for name in CREDENTIAL_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    calls = install_fake_post(monkeypatch)
+
+    with pytest.raises(RuntimeError, match=tns_catalog.TNS_API_KEY_ENV):
+        tns_catalog.download_tns_table()
+
+    assert calls == []
+
+
+def test_download_tns_table_propagates_http_errors(monkeypatch, tns_env) -> None:
+    """Verify `download_tns_table` lets a TNS rejection surface rather than returning junk"""
+    install_fake_post(monkeypatch, FakeResponse(error=requests.HTTPError("401 Unauthorized")))
+    with pytest.raises(requests.HTTPError):
+        tns_catalog.download_tns_table()

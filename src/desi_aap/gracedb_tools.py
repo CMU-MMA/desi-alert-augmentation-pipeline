@@ -423,7 +423,7 @@ def fetch_gracedb_superevents(se_types):
     A trimmed view of the result, one row per superevent::
 
         superevent_id  gw_time                           far_per_year  p_bns  p_nsbh  status
-        S190425z       2019-04-25 08:18:42.011549+00:00      1.43e-05  0.999   0.000  ok
+        S190425z       2019-04-25 08:18:05.011549+00:00      1.43e-05  0.999   0.000  ok
         S190814bv      2019-08-14 21:11:16.012957+00:00      6.41e-26  0.000   0.998  ok
     """
     classification_keys = [t.upper() for t in se_types]
