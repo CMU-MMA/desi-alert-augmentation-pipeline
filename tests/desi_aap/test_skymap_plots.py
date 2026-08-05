@@ -309,6 +309,47 @@ def test_plot_3d_coincidence_sanitizes_the_file_name(monkeypatch, tmp_path, row,
     assert path.exists()
 
 
+def test_plot_3d_coincidence_defaults_to_the_configured_format(monkeypatch, tmp_path, row, gw_events) -> None:
+    """Verify `plot_3d_coincidence` writes PLOT_OUTPUT_FORMAT when no format is asked for"""
+    install_fast_plot(monkeypatch)
+
+    path = skymap_plots.plot_3d_coincidence(row, gw_events, outdir=tmp_path)
+
+    assert path.suffix == f".{skymap_plots.PLOT_OUTPUT_FORMAT}"
+
+
+@pytest.mark.parametrize("output_format", ["png", "pdf", "svg"])
+def test_plot_3d_coincidence_writes_the_requested_format(
+    monkeypatch, tmp_path, row, gw_events, output_format
+) -> None:
+    """Verify `plot_3d_coincidence` writes the format the caller asks for"""
+    install_fast_plot(monkeypatch)
+
+    path = skymap_plots.plot_3d_coincidence(row, gw_events, outdir=tmp_path, output_format=output_format)
+
+    assert path.name == f"S190425z__2019ebq__Planck18.{output_format}"
+    assert path.exists()
+    assert path.stat().st_size > 0
+
+
+def test_plot_3d_coincidence_tolerates_a_dotted_format(monkeypatch, tmp_path, row, gw_events) -> None:
+    """Verify `plot_3d_coincidence` accepts an extension written with its leading dot"""
+    install_fast_plot(monkeypatch)
+
+    path = skymap_plots.plot_3d_coincidence(row, gw_events, outdir=tmp_path, output_format=".pdf")
+
+    assert path.name == "S190425z__2019ebq__Planck18.pdf"
+    assert path.exists()
+
+
+def test_plot_3d_coincidence_rejects_an_unwritable_format(monkeypatch, tmp_path, row, gw_events) -> None:
+    """Verify `plot_3d_coincidence` lets matplotlib reject a format the backend cannot write"""
+    install_fast_plot(monkeypatch)
+
+    with pytest.raises(ValueError):
+        skymap_plots.plot_3d_coincidence(row, gw_events, outdir=tmp_path, output_format="fits")
+
+
 def test_plot_3d_coincidence_keeps_the_figure_open_when_showing(
     monkeypatch, tmp_path, row, gw_events
 ) -> None:

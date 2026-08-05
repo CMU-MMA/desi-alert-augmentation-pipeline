@@ -9,18 +9,6 @@ draw_contours returning False. I wrote "the 3D slice was unavailable and only th
 That's what the code does, but since nothing calls it, that return contract has never actually been exercised.
 """
 
-# TODO: draw_contours is never called, and since raster_3d_density_slice is only used by draw_contours, it is
-# also never called.
-
-# That has a visible consequence in the output. In plot_3d_coincidence, drew_3d = False is set at line 202
-# and never reassigned, so the if not drew_3d: branch at line 222 always wins, and the legend on every PDF
-# you've generated says the 3D contour is "unavailable for this slice". No contour is drawn either — neither
-# the white 2D one nor the amber 3D one — despite all ten PLOT_2D_CONTOUR_* / PLOT_3D_CONTOUR_* constants.
-# The wiring looks like it was started and not finished.
-
-# TODO: do we want to be outputting to PDF? that's what the original code did, but is it best for in-notebook
-# use? Maybe, if it isn't too burdensome, have options?
-
 from pathlib import Path
 
 import numpy as np
@@ -284,7 +272,7 @@ def draw_contours(prob, skymap, row, order=CONTOUR_HEALPIX_ORDER):
     return drew_3d
 
 
-def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False):
+def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False, output_format=PLOT_OUTPUT_FORMAT):
     """Render and save a Mollweide sky plot for one SN/GW coincidence.
 
     Plots the event's skymap probability, marks the SN, and annotates the figure with the
@@ -310,12 +298,21 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False):
         If True, leave the figure open so a notebook's inline backend renders it. The file
         is written either way. Defaults to False, which closes the figure; leaving figures
         open across many coincidences accumulates them in memory.
+    output_format : str, optional
+        File extension to write, without a leading dot, such as "png" or "pdf". Any format
+        the active matplotlib backend supports is accepted, and it is the extension that
+        selects it. Defaults to PLOT_OUTPUT_FORMAT.
 
     Returns
     -------
     pathlib.Path
         Path to the written file, named
-        "<superevent_id>__<name>__<cosmology>.<PLOT_OUTPUT_FORMAT>".
+        "<superevent_id>__<name>__<cosmology>.<output_format>".
+
+    Raises
+    ------
+    ValueError
+        From matplotlib, if output_format is not a format the active backend can write.
     """
     outdir.mkdir(exist_ok=True)
     event = gw_events.set_index("superevent_id").loc[row["superevent_id"]]
@@ -425,7 +422,7 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False):
     filename = (
         f"{safe_file_part(row['superevent_id'])}__"
         f"{safe_file_part(row['name'])}__"
-        f"{safe_file_part(row['cosmology'])}.{PLOT_OUTPUT_FORMAT}"
+        f"{safe_file_part(row['cosmology'])}.{str(output_format).lstrip('.')}"
     )
     path = outdir / filename
     fig.savefig(path, bbox_inches=PLOT_BBOX_INCHES)
