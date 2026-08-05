@@ -94,8 +94,16 @@ def clean_tns_catalog(df):
         z == 0           0.0 Mpc  no crash; SN sits at the origin, credible level meaningless
         -1 < z < 0      negative   ValueError from SkyCoord in run_3d_spatial_crossmatch
         z == -1         -0.0 Mpc  no crash; -0.0 >= 0 in IEEE 754, so SkyCoord accepts it
-        -1.5 < z < -1   positive   no crash, but the distance is not physical
-        z <= -1.5              -   TypeError from luminosity_distance, raised in this function
+        z < -1                 -   TypeError from luminosity_distance, raised in this function
+
+    That last row is where the cosmologies part company, and it is Planck18 that decides
+    it for the function as a whole, since every COSMOLOGIES entry is evaluated. Planck18
+    raises immediately below z = -1, its integrand going complex; the one exception is
+    z == -2 exactly, which raises ZeroDivisionError instead of TypeError. SHOES on its own
+    would not raise anywhere below -1: it returns a positive, unphysical distance down to
+    about z = -2.4 and NaN below that, which dropna would then remove. So a catalog carrying
+    any z < -1 aborts this function today, and would silently keep or drop those rows if
+    Planck18 were ever dropped from COSMOLOGIES.
 
     Examples
     --------
@@ -123,20 +131,27 @@ def clean_tns_catalog(df):
 
     for label, cosmo in COSMOLOGIES.items():
         dist_col = f"dist_mpc_{label}"
+        if df.empty:
+            # Planck18.luminosity_distance goes through np.vectorize, which rejects a
+            # size-0 array with "cannot call vectorize on size 0 inputs unless otypes is
+            # set" rather than returning an empty result. Assigning the empty column
+            # directly keeps a catalog with no stripped-envelope objects, or an empty input,
+            # from raising ValueError out of this loop.
+            df[dist_col] = np.array([], dtype=float)
+            continue
         with warnings.catch_warnings():
-            # Defensive, and possibly vestigial: on astropy 7.1.1 no RuntimeWarning could be
-            # provoked from luminosity_distance at any redshift tried, positive, zero,
-            # negative or NaN. (z < -1 raises TypeError, which this would not catch anyway.)
+            # Live, but only in one corner: on astropy 7.1.1 the only RuntimeWarning
+            # luminosity_distance could be provoked into raising is SHOES below about
+            # z = -2.4, where the comoving-distance integral fails and returns NaN. Note
+            # that scipy's IntegrationWarning, emitted alongside it there, is a UserWarning
+            # and passes straight through this filter, and that Planck18 raises TypeError
+            # anywhere below z = -1, which this would not catch either.
+            # TODO Check with Xander.
             warnings.simplefilter("ignore", RuntimeWarning)
             df[dist_col] = cosmo.luminosity_distance(df["redshift"].to_numpy()).to_value(u.Mpc)
 
     required = ["discoverydate", "redshift", "ra", "declination"]
     df = df.dropna(subset=required)
-    # TODO Check with Xander before enabling. Drops z <= 0, which dropna does not catch.
-    # z = 0 (no redshift measured) gives a 0 Mpc distance and z < 0 (genuinely blueshifted
-    # nearby host) gives a negative one. Both clear the distance cut below, and a negative
-    # one raises ValueError from SkyCoord in run_3d_spatial_crossmatch.
-    # df = df[df["redshift"] > 0]
     near = np.zeros(len(df), dtype=bool)
     for label in COSMOLOGIES:
         near |= df[f"dist_mpc_{label}"] < MAX_STRIPPED_ENVELOPE_DISTANCE_MPC
