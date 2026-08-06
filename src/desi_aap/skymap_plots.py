@@ -15,7 +15,7 @@ from ligo.skymap.postprocess import contour, find_greedy_credible_levels
 from ligo.skymap.postprocess.cosmology import dVC_dVL_for_DL
 from matplotlib.lines import Line2D
 
-from desi_aap.gracedb_tools import CREDIBLE_LEVEL, USE_COMOVING_VOLUME_RANKING, safe_file_part
+from desi_aap.gracedb_tools import USE_COMOVING_VOLUME_RANKING, safe_file_part
 
 # Local output directory.
 PLOT_DIR = Path("gracedb_sesn_3d_plots")
@@ -111,7 +111,7 @@ def raster_prob_from_moc(skymap, order=PLOT_HEALPIX_ORDER):
     return prob
 
 
-def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=PLOT_HEALPIX_ORDER):
+def raster_3d_density_slice(skymap, dl_mpc, contour_level, order=PLOT_HEALPIX_ORDER):
     """Return an approximate projected 3D contour map at one distance.
 
 
@@ -122,8 +122,8 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=
     dl_mpc : float
         Luminosity distance in Mpc to evaluate at, normally the SN's distance under the
         cosmology being plotted.
-    contour_level : float, optional
-        Credible level the threshold should enclose. Defaults to CREDIBLE_LEVEL.
+    contour_level : float
+        Credible level the threshold should enclose.
     order : int, optional
         HEALPix order to rasterize to. Defaults to PLOT_HEALPIX_ORDER.
 
@@ -220,8 +220,8 @@ def draw_contours(prob, skymap, row, order=CONTOUR_HEALPIX_ORDER):
         The multiorder skymap those probabilities came from, needed for its distance
         columns.
     row : pandas.Series
-        A row of the run_3d_spatial_crossmatch output. Only sn_dist_mpc is read, giving the
-        distance the 3D contour is projected at.
+        A row of the run_3d_spatial_crossmatch output. sn_dist_mpc gives the distance the
+        3D contour is projected at, and credible_level the level both contours enclose.
     order : int, optional
         HEALPix order for the 3D slice. Defaults to CONTOUR_HEALPIX_ORDER, which is coarser
         than the map itself because the slice grid's cost rises 4x per order.
@@ -232,8 +232,9 @@ def draw_contours(prob, skymap, row, order=CONTOUR_HEALPIX_ORDER):
         True if at least one 3D contour polygon was drawn, False if the 3D slice was
         unavailable and only the 2D contour was drawn.
     """
+    credible_level = row["credible_level"]
     credible_2d = find_greedy_credible_levels(prob)
-    for polygon in contour(credible_2d, [CREDIBLE_LEVEL], nest=True, degrees=True)[0]:
+    for polygon in contour(credible_2d, [credible_level], nest=True, degrees=True)[0]:
         polygon = np.asarray(polygon)
         if len(polygon):
             hp.projplot(
@@ -246,7 +247,7 @@ def draw_contours(prob, skymap, row, order=CONTOUR_HEALPIX_ORDER):
             )
 
     density_slice, density_threshold = raster_3d_density_slice(
-        skymap, row["sn_dist_mpc"], CREDIBLE_LEVEL, order=order
+        skymap, row["sn_dist_mpc"], credible_level, order=order
     )
     if density_slice is None or not np.isfinite(density_threshold) or density_threshold <= 0:
         return False
@@ -281,8 +282,10 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False, output_form
         filtered on spatial_status and inside_3d_credible_level. Read for superevent_id,
         name, type, cosmology, ra, declination, sn_dist_mpc, days_from_gw,
         searched_prob_2d, searched_prob_3d_density_rank, searched_prob_dist,
-        credible_area_deg2 and credible_volume_mpc3, plus gw_far_per_year, gw_p_bns and
-        gw_p_nsbh, which fall back to NaN in the annotation when absent.
+        credible_area_deg2, credible_volume_mpc3 and credible_level, plus gw_far_per_year,
+        gw_p_bns and gw_p_nsbh, which fall back to NaN in the annotation when absent.
+        credible_level sets both the contours drawn and the percentage they are labelled
+        with.
     gw_events : pandas.DataFrame
         Superevent table from fetch_gracedb_superevents, used to look up the event's
         skymap_path by superevent_id.
@@ -344,7 +347,7 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False, output_form
         zorder=SN_MARKER_ZORDER,
     )
 
-    percent = PLOT_PERCENT_SCALE * CREDIBLE_LEVEL
+    percent = PLOT_PERCENT_SCALE * row["credible_level"]
     three_d_label = (
         f"3D density-rank {percent:.0f}% at {row['sn_dist_mpc']:.0f} Mpc"
         if drew_3d

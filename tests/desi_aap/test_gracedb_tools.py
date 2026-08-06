@@ -1,4 +1,5 @@
 import json
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,9 +12,15 @@ from desi_aap.cosmology import COSMOLOGIES
 GW190425_GPS = 1240215503.017147
 GW190425_UTC = pd.Timestamp("2019-04-25 08:18:05.017147", tz="UTC")
 
-# FAR values in Hz that land either side of FAR_THRESHOLD_PER_YEAR = 2.0 per year.
+# FAR values in Hz that land either side of the default far_threshold_per_year of 2.0.
 QUIET_FAR_HZ = 1e-9  # ~0.03 per year, passes the cut
 LOUD_FAR_HZ = 1e-6  # ~32 per year, fails the cut
+
+# Credible level these tests crossmatch at, and the default run_3d_spatial_crossmatch applies
+# when a caller does not name one. Kept separate so a change to the default is a visible
+# one-line test edit rather than something the suite silently follows.
+TEST_CREDIBLE_LEVEL = 0.5
+RUN_3D_DEFAULT_CREDIBLE_LEVEL = 0.5
 
 BNS_PASTRO = {"BNS": 0.95, "NSBH": 0.01, "BBH": 0.01, "Terrestrial": 0.03}
 BBH_PASTRO = {"BNS": 0.0, "NSBH": 0.0, "BBH": 0.99, "Terrestrial": 0.01}
@@ -291,48 +298,67 @@ def test_load_classification_propagates_errors() -> None:
 
 
 def test_skymap_priority_ranks_pipelines_and_formats() -> None:
-    """Verify `skymap_priority` prefers Bilby over BAYESTAR, and multiorder over flat FITS"""
-    assert gracedb_tools.skymap_priority("bilby.multiorder.fits") == (
-        gracedb_tools.SKYMAP_PRIORITY_BILBY_MULTIORDER
-    )
-    assert gracedb_tools.skymap_priority("bayestar.multiorder.fits") == (
-        gracedb_tools.SKYMAP_PRIORITY_BAYESTAR_MULTIORDER
-    )
-    assert gracedb_tools.skymap_priority("cwb.multiorder.fits") == (
-        gracedb_tools.SKYMAP_PRIORITY_ANY_MULTIORDER
-    )
-    assert gracedb_tools.skymap_priority("bayestar.fits.gz") == (
-        gracedb_tools.SKYMAP_PRIORITY_BAYESTAR_FITS_GZ
-    )
-    assert gracedb_tools.skymap_priority("LALInference.fits.gz") == (
-        gracedb_tools.SKYMAP_PRIORITY_ANY_FITS_GZ
-    )
-    assert gracedb_tools.skymap_priority("skymap.fits") == gracedb_tools.SKYMAP_PRIORITY_ANY_FITS
+    """Verify `skymap_priority` ranks by pipeline and format, and versioned names below all others"""
+    # Asserted as an ordering rather than against the individual rank values, so that
+    # renumbering the table in skymap_priority does not need a matching edit here.
+    best_first = [
+        "bilby.multiorder.fits",
+        "bayestar.multiorder.fits",
+        "cwb.multiorder.fits",
+        "bayestar.fits.gz",
+        "LALInference.fits.gz",
+        "skymap.fits",
+        # The version penalty is larger than the whole span of the ranking table, so every
+        # versioned name sorts below every unversioned one: a ",N" revision of the best
+        # format loses to an unversioned copy of the worst. Ordering still holds among them.
+        "bilby.multiorder.fits,0",
+        "bayestar.multiorder.fits,0",
+    ]
+    priorities = [gracedb_tools.skymap_priority(name) for name in best_first]
+
+    assert all(better < worse for better, worse in zip(priorities, priorities[1:], strict=False))
+    assert max(priorities) < gracedb_tools.SKYMAP_PRIORITY_IGNORE
 
 
 def test_skymap_priority_is_case_insensitive() -> None:
     """Verify `skymap_priority` ranks names regardless of case"""
     assert gracedb_tools.skymap_priority("Bilby.MultiOrder.FITS") == (
-        gracedb_tools.SKYMAP_PRIORITY_BILBY_MULTIORDER
+        gracedb_tools.skymap_priority("bilby.multiorder.fits")
     )
 
 
 def test_skymap_priority_ignores_non_skymaps() -> None:
-    """Verify `skymap_priority` ranks non-FITS files at or above SKYMAP_PRIORITY_IGNORE"""
-    assert gracedb_tools.skymap_priority("p_astro.json") >= gracedb_tools.SKYMAP_PRIORITY_IGNORE
-    assert gracedb_tools.skymap_priority("coinc.xml") >= gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    """Verify `skymap_priority` ranks non-FITS files at exactly SKYMAP_PRIORITY_IGNORE"""
+    assert gracedb_tools.skymap_priority("p_astro.json") == gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    assert gracedb_tools.skymap_priority("coinc.xml") == gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    # The Bilby and BAYESTAR rules match anywhere in the name, so a skymap suffix that is
+    # not the last one must still be ignored.
+    assert gracedb_tools.skymap_priority("bilby.multiorder.fits.txt") == (
+        gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    )
 
 
-def test_skymap_priority_ranks_versioned_names_below_unversioned() -> None:
-    """Verify `skymap_priority` gives a ",N" revision its base rank plus the version penalty"""
-    penalty = gracedb_tools.SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY
-    assert gracedb_tools.skymap_priority("bilby.multiorder.fits,0") == (
-        gracedb_tools.SKYMAP_PRIORITY_BILBY_MULTIORDER + penalty
-    )
-    assert gracedb_tools.skymap_priority("bayestar.fits.gz,2") == (
-        gracedb_tools.SKYMAP_PRIORITY_BAYESTAR_FITS_GZ + penalty
-    )
-    assert gracedb_tools.skymap_priority("bilby.multiorder.fits,0") < gracedb_tools.SKYMAP_PRIORITY_IGNORE
+def test_skymap_priority_ignores_without_a_version_penalty() -> None:
+    """Verify `skymap_priority` gives every ignored name the same rank, versioned or not"""
+    # choose_skymap_file discards anything at SKYMAP_PRIORITY_IGNORE without ordering them
+    # against each other, so a version penalty on top would be meaningless precision.
+    assert gracedb_tools.skymap_priority("p_astro.json,0") == gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    assert gracedb_tools.skymap_priority("coinc.xml,2") == gracedb_tools.SKYMAP_PRIORITY_IGNORE
+
+
+def test_skymap_priority_warns_on_unexpected_name_shapes() -> None:
+    """Verify `skymap_priority` warns when a name is not a bare name or a single ",N" revision"""
+    for name in ("bayestar,extra.multiorder.fits", "bilby.multiorder.fits,0,1", "a,b,c.fits"):
+        with pytest.warns(UserWarning, match="neither a bare name nor a single"):
+            gracedb_tools.skymap_priority(name)
+
+
+def test_skymap_priority_stays_quiet_on_well_formed_names() -> None:
+    """Verify `skymap_priority` does not warn about the name shapes GraceDB is expected to use"""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for name in ("bayestar.multiorder.fits", "bilby.multiorder.fits,0", "p_astro.json"):
+            gracedb_tools.skymap_priority(name)
 
 
 def test_choose_skymap_file_falls_back_to_a_versioned_skymap() -> None:
@@ -451,8 +477,9 @@ def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path) -> None:
     expected_path = gracedb_tools.SKYMAP_DIR / "S190425z__bilby.multiorder.fits"
     assert row["skymap_path"] == str(expected_path)
     assert expected_path.read_bytes() == b"FITS"
-    assert constructed == [((), {"service_url": gracedb_tools.GRACEDB_SERVICE_URL})]
-    assert client.queries == [(gracedb_tools.GRACEDB_QUERY, gracedb_tools.GRACEDB_MAX_RESULTS)]
+    assert constructed == [((), {"service_url": "https://gracedb.ligo.org/api/"})]
+    expected_far_hz = 2.0 / gracedb_tools.JULIAN_YEAR_SECONDS
+    assert client.queries == [(f"category: Production far < {expected_far_hz:.12g}", None)]
 
 
 def test_fetch_gracedb_superevents_drops_loud_events(monkeypatch, tmp_path) -> None:
@@ -488,7 +515,7 @@ def test_fetch_gracedb_superevents_falls_back_to_the_preferred_far(monkeypatch, 
 
 
 def test_fetch_gracedb_superevents_applies_the_classification_cut(monkeypatch, tmp_path) -> None:
-    """Verify `fetch_gracedb_superevents` keeps only superevents clearing MIN_CLASSIFICATION_PROB_SUM"""
+    """Verify `fetch_gracedb_superevents` keeps only superevents clearing the classification cut"""
     monkeypatch.chdir(tmp_path)
     superevents = [make_superevent("S190425z"), make_superevent("S190521g")]
     files_by_id = {sid: {"p_astro.json": "url"} for sid in ("S190425z", "S190521g")}
@@ -501,6 +528,49 @@ def test_fetch_gracedb_superevents_applies_the_classification_cut(monkeypatch, t
 
     assert gracedb_tools.fetch_gracedb_superevents(["bns"])["superevent_id"].tolist() == ["S190425z"]
     assert gracedb_tools.fetch_gracedb_superevents(["bbh"])["superevent_id"].tolist() == ["S190521g"]
+
+
+def test_fetch_gracedb_superevents_honors_the_classification_cut_argument(monkeypatch, tmp_path) -> None:
+    """Verify `fetch_gracedb_superevents` applies a caller-supplied min_classification_prob_sum"""
+    monkeypatch.chdir(tmp_path)
+    client = FakeGraceDbClient(
+        [make_superevent()],
+        {"S190425z": {"p_astro.json": "url"}},
+        payloads={("S190425z", "p_astro.json"): json.dumps(BNS_PASTRO).encode()},
+    )
+    install_fake_client(monkeypatch, client)
+
+    # BNS_PASTRO has p_bns 0.95, so it clears the 0.9 default but not a 0.99 cut.
+    assert len(gracedb_tools.fetch_gracedb_superevents(["bns"], min_classification_prob_sum=0.5)) == 1
+    assert gracedb_tools.fetch_gracedb_superevents(["bns"], min_classification_prob_sum=0.99).empty
+
+
+def test_fetch_gracedb_superevents_honors_the_far_threshold_argument(monkeypatch, tmp_path) -> None:
+    """Verify `fetch_gracedb_superevents` applies far_threshold_per_year to the query and the rows"""
+    monkeypatch.chdir(tmp_path)
+    client = FakeGraceDbClient(
+        [make_superevent(far=QUIET_FAR_HZ)],
+        {"S190425z": {"p_astro.json": "url"}},
+        payloads={("S190425z", "p_astro.json"): json.dumps(BNS_PASTRO).encode()},
+    )
+    install_fake_client(monkeypatch, client)
+
+    # QUIET_FAR_HZ is ~0.03 per year, so a cut below that drops it locally as well as in
+    # the query string the fake client records but does not act on.
+    assert gracedb_tools.fetch_gracedb_superevents(["bns"], far_threshold_per_year=0.001).empty
+    expected_far_hz = 0.001 / gracedb_tools.JULIAN_YEAR_SECONDS
+    assert client.queries == [(f"category: Production far < {expected_far_hz:.12g}", None)]
+
+
+def test_fetch_gracedb_superevents_passes_max_results_through(monkeypatch, tmp_path) -> None:
+    """Verify `fetch_gracedb_superevents` forwards max_results to the GraceDB query"""
+    monkeypatch.chdir(tmp_path)
+    client = FakeGraceDbClient([], {})
+    install_fake_client(monkeypatch, client)
+
+    gracedb_tools.fetch_gracedb_superevents(["bns"], max_results=5)
+
+    assert client.queries[0][1] == 5
 
 
 def test_fetch_gracedb_superevents_sums_requested_types(monkeypatch, tmp_path) -> None:
@@ -648,14 +718,26 @@ def test_temporal_crossmatch_matches_inside_the_window(df_sesn, gw_events) -> No
 
 def test_temporal_crossmatch_respects_the_window_edges(df_sesn, gw_events) -> None:
     """Verify `temporal_crossmatch_sesn_to_gw` includes the window edges and excludes beyond them"""
-    window = pd.Timedelta(days=gracedb_tools.TEMPORAL_WINDOW_DAYS)
+    window_days = 14
+    window = pd.Timedelta(days=window_days)
     df_sesn.loc[0, "discoverydate"] = GW190425_UTC - window
     df_sesn.loc[1, "discoverydate"] = GW190425_UTC + window + pd.Timedelta(seconds=1)
 
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=window_days)
 
     assert matches["name"].tolist() == ["2019ebq"]
-    assert matches["days_from_gw"].iloc[0] == pytest.approx(-gracedb_tools.TEMPORAL_WINDOW_DAYS)
+    assert matches["days_from_gw"].iloc[0] == pytest.approx(-window_days)
+
+
+def test_temporal_crossmatch_honors_the_window_argument(df_sesn, gw_events) -> None:
+    """Verify `temporal_crossmatch_sesn_to_gw` widens and narrows with window_days"""
+    df_sesn.loc[0, "discoverydate"] = GW190425_UTC + pd.Timedelta(days=20)
+    df_sesn.loc[1, "discoverydate"] = GW190425_UTC + pd.Timedelta(days=40)
+
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events).empty
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=30)[
+        "name"
+    ].tolist() == ["2019ebq"]
 
 
 def test_temporal_crossmatch_repeats_overlapping_events(df_sesn, gw_events) -> None:
@@ -699,7 +781,13 @@ def test_add_crossmatch_columns_copies_the_result(df_sesn) -> None:
     """Verify `add_crossmatch_columns` attaches every crossmatch field to the SN rows"""
     result = make_crossmatch_result(len(df_sesn))
 
-    out = gracedb_tools.add_crossmatch_columns(df_sesn, result, "Planck18", "dist_mpc_Planck18")
+    out = gracedb_tools.add_crossmatch_columns(
+        df_sesn,
+        result,
+        cosmology_label="Planck18",
+        distance_column="dist_mpc_Planck18",
+        credible_level=TEST_CREDIBLE_LEVEL,
+    )
 
     assert out["cosmology"].tolist() == ["Planck18"] * 2
     assert out["distance_column"].tolist() == ["dist_mpc_Planck18"] * 2
@@ -718,13 +806,19 @@ def test_add_crossmatch_columns_copies_the_result(df_sesn) -> None:
 
 
 def test_add_crossmatch_columns_flags_the_credible_level(df_sesn) -> None:
-    """Verify `add_crossmatch_columns` treats CREDIBLE_LEVEL as inclusive for both flags"""
-    level = gracedb_tools.CREDIBLE_LEVEL
+    """Verify `add_crossmatch_columns` treats credible_level as inclusive for both flags"""
+    level = TEST_CREDIBLE_LEVEL
     result = make_crossmatch_result(len(df_sesn))
     result.searched_prob = np.array([level, level + 0.01])
     result.searched_prob_vol = np.array([level + 0.01, level])
 
-    out = gracedb_tools.add_crossmatch_columns(df_sesn, result, "SHOES", "dist_mpc_SHOES")
+    out = gracedb_tools.add_crossmatch_columns(
+        df_sesn,
+        result,
+        cosmology_label="SHOES",
+        distance_column="dist_mpc_SHOES",
+        credible_level=TEST_CREDIBLE_LEVEL,
+    )
 
     assert out["inside_2d_credible_level"].tolist() == [True, False]
     assert out["inside_3d_credible_level"].tolist() == [False, True]
@@ -734,7 +828,13 @@ def test_add_crossmatch_columns_handles_missing_contours(df_sesn) -> None:
     """Verify `add_crossmatch_columns` records NaN sizes when crossmatch returned no contours"""
     result = make_crossmatch_result(len(df_sesn), contours=False)
 
-    out = gracedb_tools.add_crossmatch_columns(df_sesn, result, "SHOES", "dist_mpc_SHOES")
+    out = gracedb_tools.add_crossmatch_columns(
+        df_sesn,
+        result,
+        cosmology_label="SHOES",
+        distance_column="dist_mpc_SHOES",
+        credible_level=TEST_CREDIBLE_LEVEL,
+    )
 
     assert out["credible_volume_mpc3"].isna().all()
     assert out["credible_area_deg2"].isna().all()
@@ -745,7 +845,13 @@ def test_add_crossmatch_columns_resets_the_index(df_sesn) -> None:
     subset = df_sesn.iloc[[1]]
     result = make_crossmatch_result(1)
 
-    out = gracedb_tools.add_crossmatch_columns(subset, result, "SHOES", "dist_mpc_SHOES")
+    out = gracedb_tools.add_crossmatch_columns(
+        subset,
+        result,
+        cosmology_label="SHOES",
+        distance_column="dist_mpc_SHOES",
+        credible_level=TEST_CREDIBLE_LEVEL,
+    )
 
     assert out.index.tolist() == [0]
     assert out["searched_prob_2d"].tolist() == [0.1]
@@ -816,7 +922,7 @@ def test_run_3d_spatial_crossmatch_runs_every_cosmology(monkeypatch, temporal_ma
     assert len(reads) == 1
     assert reads[0][1] is True
     assert len(crossmatches) == len(COSMOLOGIES)
-    assert crossmatches[0][2] == (gracedb_tools.CREDIBLE_LEVEL,)
+    assert crossmatches[0][2] == (RUN_3D_DEFAULT_CREDIBLE_LEVEL,)
     assert crossmatches[0][3] == gracedb_tools.USE_COMOVING_VOLUME_RANKING
 
 

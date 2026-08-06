@@ -6,6 +6,7 @@ spatial crossmatch (RA/Dec/distance vs. the GW skymap's credible volume).
 
 import json
 import re
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -19,29 +20,10 @@ from ligo.skymap.postprocess import crossmatch
 
 from desi_aap.cosmology import COSMOLOGIES
 
-# GraceDB settings.
-GRACEDB_SERVICE_URL = "https://gracedb.ligo.org/api/"
-GRACEDB_CATEGORY = "Production"
-GRACEDB_MAX_RESULTS = None
-GRACEDB_QUERY_SIGFIGS = 12
-
-# Event-selection settings.
-FAR_THRESHOLD_PER_YEAR = 2.0
-JULIAN_YEAR_DAYS = 365.25
+# Time-unit conversions, used for the false-alarm rates GraceDB reports in Hz and for
+# the SN-to-GW offsets. astropy's yr is the Julian year, 365.25 days.
 SECONDS_PER_DAY = (1 * u.day).to_value(u.s)
-JULIAN_YEAR_SECONDS = (JULIAN_YEAR_DAYS * u.day).to_value(u.s)
-FAR_THRESHOLD_HZ = FAR_THRESHOLD_PER_YEAR / JULIAN_YEAR_SECONDS
-GRACEDB_QUERY = f"category: {GRACEDB_CATEGORY} far < {FAR_THRESHOLD_HZ:.{GRACEDB_QUERY_SIGFIGS}g}"
-MIN_CLASSIFICATION_PROB_SUM = (
-    0.9  # TODO ask about mins for things like just BBH selection - confirmed that 0.9 is good
-)
-DEFAULT_CLASSIFICATION_PROBABILITY = 0.0
-
-
-# Temporal/spatial crossmatch settings.
-TEMPORAL_WINDOW_DAYS = 14
-CREDIBLE_LEVEL = 0.50
-REQUIRE_2D_CREDIBLE_LEVEL = False
+JULIAN_YEAR_SECONDS = (1 * u.yr).to_value(u.s)
 
 # crossmatch(..., cosmology=False) ranks the 3D posterior by probability
 # density per luminosity-distance volume, matching the units in the skymaps.
@@ -52,14 +34,9 @@ USE_COMOVING_VOLUME_RANKING = True
 # Local output directory for downloaded skymaps.
 SKYMAP_DIR = Path("gracedb_skymaps")
 
-# GraceDB skymap file-selection priorities. Lower is preferred.
-SKYMAP_PRIORITY_BILBY_MULTIORDER = 0
-SKYMAP_PRIORITY_BAYESTAR_MULTIORDER = 10
-SKYMAP_PRIORITY_ANY_MULTIORDER = 20
-SKYMAP_PRIORITY_BAYESTAR_FITS_GZ = 30
-SKYMAP_PRIORITY_ANY_FITS_GZ = 40
-SKYMAP_PRIORITY_ANY_FITS = 50
-SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY = 100
+# Rank given to names that are not skymaps at all. The rest of the skymap file-selection
+# priorities are local to skymap_priority; this one is shared because choose_skymap_file
+# filters on it to decide which names are usable.
 SKYMAP_PRIORITY_IGNORE = 1000
 
 
@@ -211,8 +188,9 @@ def skymap_priority(name):
 
     Bilby is preferred over BAYESTAR, and multiorder FITS over flat FITS. The unversioned
     name, which GraceDB points at the newest revision, is preferred over the ",N" snapshots,
-    which take a fixed SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY. Names that are not skymaps at
-    all rank at SKYMAP_PRIORITY_IGNORE or above.
+    which take a fixed penalty. Names that are not skymaps at all rank at exactly
+    SKYMAP_PRIORITY_IGNORE, with no version penalty, since choose_skymap_file discards them
+    all alike and never orders them against each other.
 
     Parameters
     ----------
@@ -222,31 +200,59 @@ def skymap_priority(name):
     Returns
     -------
     int
-        Priority built from the SKYMAP_PRIORITY_* constants. Values below
-        SKYMAP_PRIORITY_IGNORE identify usable skymaps.
+        Priority from the ranking table below, plus the penalty if the name is versioned,
+        or SKYMAP_PRIORITY_IGNORE. Values below SKYMAP_PRIORITY_IGNORE identify usable
+        skymaps.
+
+    Warns
+    -----
+    UserWarning
+        If name is neither a bare file name nor a bare name with a single ",N" revision,
+        for example "bayestar,extra.fits" or "bayestar.fits,0,1". Such a name is still
+        ranked, on the text before its first comma, so it is normally ignored and
+        choose_skymap_file falls through to the next candidate. The warning is not an
+        error: the name came from GraceDB, so it signals that the parsing here needs
+        updating rather than that the caller did anything wrong.
     """
     lower = name.lower()
-    version_penalty = SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY if re.search(r",\d+$", lower) else 0
-    if lower.count(",") > 1:
-        print(
-            f"Warning: file name {name} has more than one comma, which creates issues with version selection."
+    # A GraceDB name is expected to be a bare file name, optionally followed by a single
+    # ",N" revision. Anything else means this module's model of the listing format is
+    # incomplete, so it is worth surfacing rather than silently mis-ranking: the split
+    # below keeps only the text before the first comma, which for such a name is not the
+    # file name at all.
+    if not re.fullmatch(r"[^,]*(,\d+)?", lower):
+        warnings.warn(
+            f"GraceDB file name {name!r} is neither a bare name nor a single ',N' revision; "
+            "it is ranked on the text before its first comma and will most likely be ignored.",
+            UserWarning,
+            # Deliberately points here rather than at the caller: the message is for whoever
+            # maintains this parsing, and choose_skymap_file ranks each name from two
+            # separate lines, which at stacklevel=2 would warn twice for the same name.
+            stacklevel=1,
         )
     unversioned = lower.split(",", 1)[0]
+    # Reject any non-skymap files before doing any additional work.
     if not unversioned.endswith((".multiorder.fits", ".fits.gz", ".fits")):
-        return SKYMAP_PRIORITY_IGNORE + version_penalty
-    if "bilby.multiorder.fits" in unversioned:
-        return SKYMAP_PRIORITY_BILBY_MULTIORDER + version_penalty
-    if "bayestar.multiorder.fits" in unversioned:
-        return SKYMAP_PRIORITY_BAYESTAR_MULTIORDER + version_penalty
-    if unversioned.endswith(".multiorder.fits"):
-        return SKYMAP_PRIORITY_ANY_MULTIORDER + version_penalty
-    if "bayestar" in unversioned and unversioned.endswith(".fits.gz"):
-        return SKYMAP_PRIORITY_BAYESTAR_FITS_GZ + version_penalty
-    if unversioned.endswith(".fits.gz"):
-        return SKYMAP_PRIORITY_ANY_FITS_GZ + version_penalty
-    if unversioned.endswith(".fits"):
-        return SKYMAP_PRIORITY_ANY_FITS + version_penalty
-    return SKYMAP_PRIORITY_IGNORE + version_penalty
+        return SKYMAP_PRIORITY_IGNORE
+
+    versioned_file_penalty = 100
+    version_penalty = versioned_file_penalty if re.search(r",\d+$", lower) else 0
+    # Ranking table, best first; the first rule whose test passes decides the priority.
+    # The gaps between the ranks leave room to slot in a new producer without renumbering.
+    priority_rules = (
+        (lambda stem: "bilby.multiorder.fits" in stem, 0),
+        (lambda stem: "bayestar.multiorder.fits" in stem, 10),
+        (lambda stem: stem.endswith(".multiorder.fits"), 20),
+        (lambda stem: "bayestar" in stem and stem.endswith(".fits.gz"), 30),
+        (lambda stem: stem.endswith(".fits.gz"), 40),
+        (lambda stem: stem.endswith(".fits"), 50),
+    )
+    for matches, priority in priority_rules:
+        if matches(unversioned):
+            return priority + version_penalty
+    # Unreachable while the suffix guard above and the last three rules agree on which
+    # suffixes count; kept so that loosening one without the other cannot return None.
+    return SKYMAP_PRIORITY_IGNORE
 
 
 def choose_skymap_file(files):
@@ -344,14 +350,14 @@ def gps_to_utc(gps_time):
     return pd.Timestamp(Time(float(gps_time), format="gps").utc.to_datetime(), tz="UTC")
 
 
-def fetch_gracedb_superevents(se_types):
+def fetch_gracedb_superevents(
+    se_types,
+    *,
+    far_threshold_per_year=2.0,
+    min_classification_prob_sum=0.9,
+    max_results=None,
+):
     """Query GraceDB for superevents passing the FAR and classification cuts.
-
-    Walks the public superevents in GraceDB's "Production" category, meaning real candidates
-    rather than the Test and MDC (mock data challenge) categories, whose false-alarm rate is
-    below FAR_THRESHOLD_PER_YEAR. Reads each one's p_astro classification, keeps those whose
-    combined probability across the requested types clears MIN_CLASSIFICATION_PROB_SUM, and
-    downloads the best available skymap into SKYMAP_DIR.
 
     Per-superevent failures are not fatal. They are recorded in the row's status column and
     the scan continues.
@@ -361,8 +367,19 @@ def fetch_gracedb_superevents(se_types):
     se_types : list of str
         Superevent type strings to include, matched case-insensitively against the p_astro
         class names. Supported values: "bns", "nsbh", "bbh". Only superevents whose
-        combined probability for the requested types exceeds MIN_CLASSIFICATION_PROB_SUM
+        combined probability for the requested types exceeds min_classification_prob_sum
         are returned.
+    far_threshold_per_year : float, optional
+        False-alarm-rate cut in events per Julian year. Applied twice: once in the GraceDB
+        query itself, converted to the Hz the API expects, and once locally, since a
+        superevent whose own FAR is missing is judged on its preferred event's instead.
+        Defaults to 2.0.
+    min_classification_prob_sum : float, optional
+        Minimum combined p_astro probability across se_types, exclusive. Defaults to 0.9.
+        # TODO ask about mins for things like just BBH selection - confirmed that 0.9 is good
+    max_results : int or None, optional
+        Cap on the number of superevents the query returns, passed straight to
+        GraceDb.superevents(). None, the default, means no cap.
 
     Returns
     -------
@@ -408,16 +425,30 @@ def fetch_gracedb_superevents(se_types):
         S190425z       2019-04-25 08:18:05.011549+00:00      1.43e-05  0.999   0.000  ok
         S190814bv      2019-08-14 21:11:16.012957+00:00      6.41e-26  0.000   0.998  ok
     """
+    service_url = "https://gracedb.ligo.org/api/"
+    category = "Production"
+    # Significant figures the FAR threshold is rendered with in the query string. Enough
+    # that the rounding cannot move the cut across a real superevent's FAR.
+    query_sigfigs = 12
+    # Probability read for a class the p_astro payload does not carry. The explicit zero
+    # matters: as_float defaults to NaN, which would propagate through the sum below and
+    # make the cut drop the superevent outright rather than judge it on the classes it does
+    # report.
+    default_classification_probability = 0.0
+
+    far_threshold_hz = far_threshold_per_year / JULIAN_YEAR_SECONDS
+    query = f"category: {category} far < {far_threshold_hz:.{query_sigfigs}g}"
+
     classification_keys = [t.upper() for t in se_types]
-    client = GraceDb(service_url=GRACEDB_SERVICE_URL)
+    client = GraceDb(service_url=service_url)
     rows = []
 
-    for superevent in client.superevents(query=GRACEDB_QUERY, max_results=GRACEDB_MAX_RESULTS):
+    for superevent in client.superevents(query=query, max_results=max_results):
         sid = superevent.get("superevent_id")
         preferred = superevent.get("preferred_event_data", {}) or {}
         far_hz = as_float(superevent.get("far"), as_float(preferred.get("far")))
         far_per_year = far_hz * JULIAN_YEAR_SECONDS
-        if not np.isfinite(far_per_year) or far_per_year >= FAR_THRESHOLD_PER_YEAR:
+        if not np.isfinite(far_per_year) or far_per_year >= far_threshold_per_year:
             continue
 
         try:
@@ -449,10 +480,10 @@ def fetch_gracedb_superevents(se_types):
             status = "ok"
 
         prob_sum = sum(
-            as_float(classification.get(key), DEFAULT_CLASSIFICATION_PROBABILITY)
+            as_float(classification.get(key), default_classification_probability)
             for key in classification_keys
         )
-        if not (prob_sum > MIN_CLASSIFICATION_PROB_SUM):  # TODO - is this how we want to approach
+        if not (prob_sum > min_classification_prob_sum):  # TODO - is this how we want to approach
             continue
 
         skymap_file = choose_skymap_file(files)
@@ -472,11 +503,11 @@ def fetch_gracedb_superevents(se_types):
                 "gps_time": gps_time,
                 "far_hz": far_hz,
                 "far_per_year": far_per_year,
-                "p_bns": as_float(classification.get("BNS"), DEFAULT_CLASSIFICATION_PROBABILITY),
-                "p_nsbh": as_float(classification.get("NSBH"), DEFAULT_CLASSIFICATION_PROBABILITY),
-                "p_bbh": as_float(classification.get("BBH"), DEFAULT_CLASSIFICATION_PROBABILITY),
+                "p_bns": as_float(classification.get("BNS"), default_classification_probability),
+                "p_nsbh": as_float(classification.get("NSBH"), default_classification_probability),
+                "p_bbh": as_float(classification.get("BBH"), default_classification_probability),
                 "p_terrestrial": as_float(
-                    classification.get("Terrestrial"), DEFAULT_CLASSIFICATION_PROBABILITY
+                    classification.get("Terrestrial"), default_classification_probability
                 ),
                 "classification_file": classification_file,
                 "preferred_event": preferred.get("graceid"),
@@ -496,12 +527,12 @@ def fetch_gracedb_superevents(se_types):
 
 
 def temporal_crossmatch_sesn_to_gw(
-    df_sesn, gw_events, verbose=False
+    df_sesn, gw_events, *, window_days=14, verbose=False
 ):  # TODO may want to generalize beyond just sesn
     """Match SNe to GW events whose discovery date falls within the temporal window.
 
-    The window is TEMPORAL_WINDOW_DAYS either side of the event's gw_time. Note that
-    an SN close in time to two events appears twice, once per event.
+    The window is window_days either side of the event's gw_time. Note that an SN close in
+    time to two events appears twice, once per event.
 
     Parameters
     ----------
@@ -512,6 +543,9 @@ def temporal_crossmatch_sesn_to_gw(
     gw_events : pandas.DataFrame
         Superevent table from fetch_gracedb_superevents. Events with a missing gw_time are
         skipped.
+    window_days : float, optional
+        Half-width of the matching window in days, applied either side of gw_time and
+        inclusive at both ends. Defaults to 14.
     verbose : bool, optional
         If True, print each event as it is checked. Defaults to False.
 
@@ -551,8 +585,8 @@ def temporal_crossmatch_sesn_to_gw(
         if verbose:
             print(f"Checking grav wave {i}: {gw['superevent_id']} ({gw['gw_time']})")
 
-        start = gw["gw_time"] - pd.Timedelta(days=TEMPORAL_WINDOW_DAYS)
-        end = gw["gw_time"] + pd.Timedelta(days=TEMPORAL_WINDOW_DAYS)
+        start = gw["gw_time"] - pd.Timedelta(days=window_days)
+        end = gw["gw_time"] + pd.Timedelta(days=window_days)
         sn = df_sesn[(df_sesn["discoverydate"] >= start) & (df_sesn["discoverydate"] <= end)].copy()
         if sn.empty:
             continue
@@ -584,7 +618,7 @@ def temporal_crossmatch_sesn_to_gw(
     )
 
 
-def add_crossmatch_columns(sn_rows, result, cosmology_label, distance_column):
+def add_crossmatch_columns(sn_rows, result, *, cosmology_label, distance_column, credible_level):
     """Attach ligo.skymap crossmatch result fields to a copy of the matched SN rows.
 
     Parameters
@@ -600,16 +634,22 @@ def add_crossmatch_columns(sn_rows, result, cosmology_label, distance_column):
         example "Planck18".
     distance_column : str
         Name of the sn_rows column holding the luminosity distance in Mpc under that
-        cosmology, for example "dist_mpc_Planck18".
+        cosmology, for example "dist_mpc_Planck18". Pairing it with a cosmology_label it
+        does not belong to is not detected: the row would name one cosmology and carry the
+        other's distance.
+    credible_level : float
+        Credible level the inside_*_credible_level flags are judged against.
 
     Returns
     -------
     pandas.DataFrame
         A copy of sn_rows with the index reset and these columns added:
 
-        cosmology, distance_column, sn_dist_mpc
+        cosmology, distance_column, credible_level, sn_dist_mpc
             The arguments above recorded per row, with sn_dist_mpc the distance in Mpc
-            actually used for this SN.
+            actually used for this SN. credible_level makes the frame self-describing, so
+            a consumer such as skymap_plots draws and labels the contour the numbers were
+            actually computed at rather than assuming a default.
         searched_area_deg2, searched_prob_2d, offset_deg
             Sky-only results, marginalized over distance. The area searched before reaching
             the SN, the SN's 2D credible level, and its angular offset from the skymap's
@@ -625,16 +665,17 @@ def add_crossmatch_columns(sn_rows, result, cosmology_label, distance_column):
             A copy of searched_prob_vol, named to make the ranking explicit next to
             searched_prob_2d.
         credible_volume_mpc3, credible_area_deg2
-            Size of the CREDIBLE_LEVEL contour for the event as a whole, so identical on
+            Size of the credible_level contour for the event as a whole, so identical on
             every row, or NaN if crossmatch returned no contours.
         inside_2d_credible_level, inside_3d_credible_level
-            Whether the SN falls inside the CREDIBLE_LEVEL contour under the 2D and 3D
+            Whether the SN falls inside the credible_level contour under the 2D and 3D
             rankings. These are not nested quantities, so an SN can be inside one and
             outside the other.
     """
     out = sn_rows.copy().reset_index(drop=True)
     out["cosmology"] = cosmology_label
     out["distance_column"] = distance_column
+    out["credible_level"] = credible_level
     out["sn_dist_mpc"] = out[distance_column]
     out["searched_area_deg2"] = np.atleast_1d(result.searched_area)
     out["searched_prob_2d"] = np.atleast_1d(result.searched_prob)
@@ -646,12 +687,12 @@ def add_crossmatch_columns(sn_rows, result, cosmology_label, distance_column):
     out["probdensity_vol"] = np.atleast_1d(result.probdensity_vol)
     out["credible_volume_mpc3"] = result.contour_vols[0] if result.contour_vols else np.nan
     out["credible_area_deg2"] = result.contour_areas[0] if result.contour_areas else np.nan
-    out["inside_2d_credible_level"] = out["searched_prob_2d"] <= CREDIBLE_LEVEL
-    out["inside_3d_credible_level"] = out["searched_prob_vol"] <= CREDIBLE_LEVEL
+    out["inside_2d_credible_level"] = out["searched_prob_2d"] <= credible_level
+    out["inside_3d_credible_level"] = out["searched_prob_vol"] <= credible_level
     return out
 
 
-def failed_spatial_rows(sn_rows, status, cosmology=np.nan):
+def failed_spatial_rows(sn_rows, status, cosmology=np.nan, credible_level=np.nan):
     """Mark SN rows as failing the spatial crossmatch with a given status.
 
     Gives failed rows the flag columns a successful crossmatch would have, so they can be
@@ -670,11 +711,16 @@ def failed_spatial_rows(sn_rows, status, cosmology=np.nan):
         "crossmatch_failed: ...", the one failure raised inside the per-cosmology loop where
         a label is already known. The other three happen before that loop is entered and
         leave it NaN. Defaults to np.nan.
+    credible_level : float, optional
+        Credible level to record, following cosmology: set only for
+        "crossmatch_failed: ...". The column describes the level a row's measurements were
+        computed at, and these rows have none, so NaN is the honest value rather than the
+        level the run was configured with. Defaults to np.nan.
 
     Returns
     -------
     pandas.DataFrame
-        A copy of sn_rows with spatial_status and cosmology set, and both
+        A copy of sn_rows with spatial_status, cosmology and credible_level set, and both
         inside_2d_credible_level and inside_3d_credible_level set to False. The crossmatch
         measurement columns are absent here, so they read as NaN once these rows are
         concatenated with successful ones.
@@ -682,12 +728,13 @@ def failed_spatial_rows(sn_rows, status, cosmology=np.nan):
     out = sn_rows.copy()
     out["spatial_status"] = status
     out["cosmology"] = cosmology
+    out["credible_level"] = credible_level
     out["inside_2d_credible_level"] = False
     out["inside_3d_credible_level"] = False
     return out
 
 
-def run_3d_spatial_crossmatch(temporal_matches, gw_events):
+def run_3d_spatial_crossmatch(temporal_matches, gw_events, *, credible_level=0.5):
     """Run the 3D credible-volume crossmatch for each cosmology on every temporal match.
 
     Groups the temporally matched SNe by superevent, reads each event's skymap once and
@@ -705,6 +752,11 @@ def run_3d_spatial_crossmatch(temporal_matches, gw_events):
     gw_events : pandas.DataFrame
         Superevent table from fetch_gracedb_superevents, used to look up each event's
         skymap_path by superevent_id. Superevents absent from it are skipped.
+    credible_level : float, optional
+        Credible level the contours are computed at and the inside_*_credible_level flags
+        are judged against. This is the one place the pipeline's chosen level is defaulted;
+        it is recorded on every successful row, so downstream consumers read it from the
+        frame rather than assuming a value. Defaults to 0.5.
 
     Returns
     -------
@@ -777,13 +829,19 @@ def run_3d_spatial_crossmatch(temporal_matches, gw_events):
                 result = crossmatch(
                     skymap,
                     coords,
-                    contours=(CREDIBLE_LEVEL,),
+                    contours=(credible_level,),
                     cosmology=USE_COMOVING_VOLUME_RANKING,
                 )
-                out = add_crossmatch_columns(valid, result, cosmology_label, distance_column)
+                out = add_crossmatch_columns(
+                    valid,
+                    result,
+                    cosmology_label=cosmology_label,
+                    distance_column=distance_column,
+                    credible_level=credible_level,
+                )
                 out["spatial_status"] = "ok"
             except Exception as exc:
-                out = failed_spatial_rows(valid, f"crossmatch_failed: {exc}", cosmology_label)
+                out = failed_spatial_rows(valid, f"crossmatch_failed: {exc}", cosmology_label, credible_level)
                 out["distance_column"] = distance_column
             chunks.append(out)
 
