@@ -106,6 +106,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["D101","D102","D103"]
 # raster_3d_density_slice names its intermediates after the quantities they hold, so dP_dA
 # is the probability density per unit area and dV a volume element. Lowercasing them to
 # satisfy pep8-naming would leave dp_da and dv, which no longer read as the maths.
@@ -113,7 +114,6 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
-
 
 [tool.coverage.run]
 omit=["src/desi_aap/_version.py"]
