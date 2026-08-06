@@ -1,7 +1,7 @@
 # Live integration test against the BOOM (kaboom) API.
 #
 # This re-queries the fixed "gold standard" window and diffs the result against
-# the committed snapshot (tests/desi_aap/data/gold_standard_alerts.csv).
+# the committed snapshot (tests/desi_aap/data/gold_standard_alerts.parquet).
 #
 # It needs live credentials, so it does NOT run on pull requests from forks
 # (which cannot read secrets). Add the credentials under:
