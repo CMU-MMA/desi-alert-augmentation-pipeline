@@ -19,7 +19,15 @@ dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
     "astropy>=8.0",
-    "nested-pandas>=0.6", # NestedFrame for list-of-struct alert fields; brings in pyarrow
+    "healpy>=1.17.1",  # 1.17.1 rather than 1.16: healpy imported scipy.integrate.trapz
+                       # until then, and scipy removed it in 1.14. scipy is only a transitive
+                       # dependency here, so it resolves to a current release even in the
+                       # lowest-versions job, and an older healpy fails on import.
+    "ligo-gracedb>=2.10",
+    "ligo.skymap>=1.0.7",
+    "matplotlib>=3.6",
+    "nested-pandas>=0.6",  # NestedFrame for list-of-struct alert fields; brings in pyarrow
+    "numpy>=1.24",
     "pandas>=2.2.3",
     "requests>=2.28",
 ]
@@ -105,6 +113,15 @@ ignore = [
     "UP028", # Allow yield in for loop
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["D101","D102","D103"]
+# raster_3d_density_slice names its intermediates after the quantities they hold, so dP_dA
+# is the probability density per unit area and dV a volume element. Lowercasing them to
+# satisfy pep8-naming would leave dp_da and dv, which no longer read as the maths.
+"src/desi_aap/skymap_plots.py" = ["N806"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
 
 [tool.coverage.run]
 omit=["src/desi_aap/_version.py"]

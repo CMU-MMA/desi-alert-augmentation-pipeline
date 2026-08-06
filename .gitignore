@@ -151,3 +151,15 @@ _html/
 
 # Claude Code
 .claude/
+
+# Downloaded GraceDB skymaps (see SKYMAP_DIR in src/desi_aap/gracedb_tools.py)
+gracedb_skymaps/
+
+# Generated plots (see PLOT_DIR in src/desi_aap/skymap_plots.py)
+gracedb_sesn_3d_plots/
+
+# Data and figure outputs
+*.fits
+*.fits.gz
+*.fit
+*.pdf
