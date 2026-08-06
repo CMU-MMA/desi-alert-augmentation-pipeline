@@ -23,9 +23,9 @@ jobs:
         python-version: ['3.11', '3.12', '3.13']
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@v7
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install uv
@@ -39,5 +39,9 @@ jobs:
       run: |
         pip list
     - name: Run unit tests with pytest
+      env:
+        TNS_API_KEY: ${{ secrets.TNS_API_KEY }}
+        TNS_BOT_ID: ${{ secrets.TNS_BOT_ID }}
+        TNS_BOT_NAME: ${{ secrets.TNS_BOT_NAME }}
       run: |
         python -m pytest
