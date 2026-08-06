@@ -155,6 +155,10 @@ gracedb_skymaps/
 # Generated plots (see PLOT_DIR in src/desi_aap/skymap_plots.py)
 gracedb_sesn_3d_plots/
 
+# Notices and localization maps filed by the GCN listener (see STORE_ROOT in
+# src/desi_aap/gcn_store.py)
+gcn_localizations/
+
 # Data and figure outputs
 *.fits
 *.fits.gz
