@@ -149,6 +149,9 @@ _html/
 # Project initialization script
 .initialize_new_project.sh
 
+# Claude Code
+.claude/
+
 # Downloaded GraceDB skymaps (see SKYMAP_DIR in src/desi_aap/gracedb_tools.py)
 gracedb_skymaps/
 

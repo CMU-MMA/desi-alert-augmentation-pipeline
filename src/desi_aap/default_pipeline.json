@@ -1,0 +1,112 @@
+[
+  {
+    "$project": {
+      "candidate.ra": 1,
+      "candidate.dec": 1,
+      "candidate.jd": 1,
+      "candidate.isDipole": 1,
+      "candidate.isdiffpos": 1,
+      "candidate.magpsf": 1,
+      "candidate.ndethist": 1,
+      "candidate.reliability": 1,
+      "cross_matches.LSPSC": 1,
+      "distance_arcsec": 1,
+      "mag_white": 1,
+      "properties.near_brightstar": 1,
+      "properties.rock": 1,
+      "properties.star": 1,
+      "properties.stationary": 1,
+      "score": 1,
+      "objectId": 1
+    }
+  },
+  {
+    "$match": {
+      "$and": [
+        {
+          "$and": [
+            { "candidate.magpsf": { "$lte": 22 } },
+            { "candidate.isdiffpos": { "$in": [true] } },
+            { "candidate.reliability": { "$gt": 0.7 } },
+            { "candidate.isDipole": { "$in": [false] } },
+            { "candidate.ndethist": { "$gte": 2 } },
+            { "candidate.dec": { "$gt": -30 } }
+          ]
+        },
+        {
+          "$and": [
+            {
+              "$and": [
+                { "properties.rock": { "$in": [false] } },
+                { "properties.star": { "$in": [false] } },
+                { "properties.near_brightstar": { "$in": [false] } },
+                { "properties.stationary": { "$in": [true] } }
+              ]
+            },
+            {
+              "$expr": {
+                "$not": {
+                  "$anyElementTrue": {
+                    "$map": {
+                      "input": { "$ifNull": ["$cross_matches.LSPSC", []] },
+                      "in": {
+                        "$and": [
+                          { "$gte": ["$$this.score", 0.7] },
+                          {
+                            "$or": [
+                              { "$and": [
+                                  { "$lte": ["$$this.distance_arcsec", 4] },
+                                  { "$lte": ["$$this.mag_white", 18] }
+                                ]
+                              },
+                              { "$and": [
+                                  { "$lte": ["$$this.distance_arcsec", 10] },
+                                  { "$lte": ["$$this.mag_white", 16] }
+                                ]
+                              },
+                              { "$and": [
+                                  { "$lte": ["$$this.distance_arcsec", 30] },
+                                  { "$lte": ["$$this.mag_white", 15] }
+                                ]
+                              },
+                              { "$and": [
+                                  { "$lte": ["$$this.distance_arcsec", 6] },
+                                  { "$lte": ["$$this.mag_white", 17.5] }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "$project": {
+      "objectId": 1,
+      "candidate.ra": 1,
+      "candidate.dec": 1,
+      "candidate.jd": 1,
+      "candidate.isDipole": 1,
+      "candidate.isdiffpos": 1,
+      "candidate.magpsf": 1,
+      "candidate.ndethist": 1,
+      "candidate.reliability": 1,
+      "cross_matches.LSPSC": 1,
+      "distance_arcsec": 1,
+      "mag_white": 1,
+      "properties.near_brightstar": 1,
+      "properties.rock": 1,
+      "properties.star": 1,
+      "properties.stationary": 1,
+      "score": 1
+    }
+  }
+]
