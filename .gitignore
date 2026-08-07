@@ -163,3 +163,6 @@ gracedb_sesn_3d_plots/
 *.fits.gz
 *.fit
 *.pdf
+
+# PyCharm
+.idea

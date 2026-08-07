@@ -1,0 +1,54 @@
+# Configuration for the DESI alert augmentation pipeline.
+#
+#   desi-aap run --config config.toml
+#
+[run]
+# Root directory for output. Each stage writes into its own subdirectory of
+# this, e.g. output/query/ and output/crossmatch/, holding one
+# timestamped parquet file per run. Each run also writes its log to
+# output/logs/<timestamp>.log. One timestamp, taken when the run starts, names
+# all of them, so a run's files group together.
+output_dir = "output"
+
+# Dask cluster settings shared by every stage. Anything
+# dask.distributed.Client accepts can go here; a stage can override any of it
+# with its own [<stage>.dask] table below.
+[dask]
+n_workers = 4
+threads_per_worker = 1
+memory_limit = "2GB"
+
+# ===========================================================================
+# Stage: query -- ask BOOM for the alerts in a time window.
+# ===========================================================================
+
+[query.boom]
+survey = "LSST"
+# limit = 1000
+
+[query.window]
+# Width of the trailing query window, ending now.
+# Durations are strings: "30m", "2h", "7d", "1d12h".
+lookback = "1h"
+# start = 2026-06-01T00:00:00Z
+# end = 2026-06-02T00:00:00Z
+
+# ===========================================================================
+# Stage: crossmatch -- match those alerts against each catalog below.
+# Each crossmatch creates a new nested column with the results of the match.
+# ===========================================================================
+
+# Cluster overrides for this stage only, merged over the global [dask] above.
+# [crossmatch.dask]
+# n_workers = 8
+# memory_limit = "32GB"
+
+[crossmatch.catalogs.desi_dr1]
+catalog = "/ocean/projects/phy250012p/shared/3DTS/DESI/dr1/desi_dr1_zcat"
+radius_arcsec = 5.0
+n_neighbors = 1
+
+[crossmatch.catalogs.desi_dr2]
+catalog = "/ocean/projects/phy250012p/shared/3DTS/DESI/dr2/desi_dr2_zcat"
+radius_arcsec = 5.0
+n_neighbors = 1
