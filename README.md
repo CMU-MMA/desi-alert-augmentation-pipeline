@@ -91,7 +91,7 @@ The pipeline writes intermediate results, per stage, in parquet. Each stage
 gets its own subdirectory of `run.output_dir`, and one run leaves three files:
 
 ```
-/data/desi_aap/
+/output/
 ├── query/
 │   └── alerts_20260807T182718Z.parquet     # every alert BOOM returned
 ├── crossmatch/
