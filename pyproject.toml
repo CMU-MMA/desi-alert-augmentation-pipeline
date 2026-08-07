@@ -29,6 +29,7 @@ dependencies = [
     "matplotlib>=3.6",
     "ligo-gracedb>=2.10",
     "ligo.skymap>=1.0.7",
+    "lsdb>=0.10.4",
 ]
 
 [project.urls]
