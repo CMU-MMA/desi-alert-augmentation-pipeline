@@ -6,23 +6,8 @@ import nested_pandas as npd
 import pytest
 from astropy.time import Time
 
-from desi_aap import boom
+from desi_aap import pipeline
 from desi_aap.stages.query import STAGE, resolve_window, run_query
-
-
-@pytest.fixture
-def stub_boom(monkeypatch, gold_standard_alerts):
-    """Serve the committed alert snapshot instead of calling the live broker."""
-    monkeypatch.setattr(boom, "query_alerts", lambda **kwargs: gold_standard_alerts)
-    return gold_standard_alerts
-
-
-@pytest.fixture
-def stub_boom_no_alerts(monkeypatch):
-    """A window the broker returns nothing for."""
-    frame = npd.NestedFrame({"objectId": [], "candidate.ra": [], "candidate.dec": []})
-    monkeypatch.setattr(boom, "query_alerts", lambda **kwargs: frame)
-    return frame
 
 
 def test_run_query(pipeline_config, stub_boom):
@@ -32,16 +17,20 @@ def test_run_query(pipeline_config, stub_boom):
     assert result.stage == "query"
     assert result.stamp == "20260807T120000Z"
     assert result.summary["end_jd"] - result.summary["start_jd"] == pytest.approx(1 / 24)
-
-    assert not result.is_empty
     assert result.summary["n_alerts"] == 327
 
     assert isinstance(result.frame, npd.NestedFrame)
+    assert not result.is_empty
     assert len(result.frame) == 327
 
     output_path = pipeline_config.run.stage_dir(STAGE) / "alerts_20260807T120000Z.parquet"
     assert result.output_path == output_path
-    assert npd.read_parquet(output_path).equals(stub_boom)
+    alerts = npd.read_parquet(output_path)
+    assert alerts.equals(result.frame)
+
+    # The results should be the same whether we call the stage directly or run the whole pipeline
+    results = pipeline.run_pipeline(pipeline_config, stamp="20260807T120000Z")
+    assert results["query"].frame.equals(alerts)
 
 
 def test_window_defaults_to_a_trailing_lookback():

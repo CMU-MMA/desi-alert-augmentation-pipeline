@@ -3,6 +3,7 @@
 import nested_pandas as npd
 import pytest
 
+from desi_aap import pipeline
 from desi_aap.stages.base import StageResult
 from desi_aap.stages.crossmatch import (
     STAGE,
@@ -30,7 +31,7 @@ def unmatched_alerts(gold_standard_alerts):
     return {QUERY_STAGE: StageResult(stage=QUERY_STAGE, frame=frame)}
 
 
-def test_run_crossmatch(pipeline_config, alert_inputs):
+def test_run_crossmatch(pipeline_config, alert_inputs, stub_boom):
     """Verify unmatched alerts are filtered out, so the filter does real work"""
     result = run_crossmatch(pipeline_config, inputs=alert_inputs, stamp="20260807T120000Z")
 
@@ -38,11 +39,18 @@ def test_run_crossmatch(pipeline_config, alert_inputs):
     assert result.summary["n_alerts_matched"] == 8
     assert result.summary["desi_dr1"] == {"n_alerts_matched": 8, "n_matches": 8}
 
-    matches = npd.read_parquet(result.output_path)
+    output_path = pipeline_config.run.stage_dir(STAGE) / "matches_20260807T120000Z.parquet"
+    assert result.output_path == output_path
+
+    matches = npd.read_parquet(output_path)
     assert len(matches) == 8
     assert "desi_dr1" in matches.columns
     assert all(matches["desi_dr1"].array.list_lengths == 1)
     assert all(matches["desi_dr1._dist_arcsec"] <= 5.0)
+
+    # The results should be the same whether we call the stage directly or run the whole pipeline
+    results = pipeline.run_pipeline(pipeline_config, stamp="20260807T120000Z")
+    assert results["crossmatch"].frame.equals(matches)
 
 
 def test_catalog_specs_come_from_the_config(pipeline_config):

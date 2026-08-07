@@ -4,6 +4,7 @@ import lsdb
 import nested_pandas as npd
 import pytest
 
+from desi_aap import boom
 from desi_aap.config import PipelineConfig
 
 TEST_DIR = Path(__file__).parent
@@ -64,3 +65,18 @@ def pipeline_config(tmp_path, desi_dr1_cosmos_dir):
             },
         }
     )
+
+
+@pytest.fixture
+def stub_boom(monkeypatch, gold_standard_alerts):
+    """Serve the committed alert snapshot instead of calling the live broker."""
+    monkeypatch.setattr(boom, "query_alerts", lambda **kwargs: gold_standard_alerts)
+    return gold_standard_alerts
+
+
+@pytest.fixture
+def stub_boom_no_alerts(monkeypatch):
+    """A window the broker returns nothing for."""
+    frame = npd.NestedFrame({"objectId": [], "candidate.ra": [], "candidate.dec": []})
+    monkeypatch.setattr(boom, "query_alerts", lambda **kwargs: frame)
+    return frame
