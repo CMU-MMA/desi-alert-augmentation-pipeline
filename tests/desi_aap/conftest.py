@@ -4,6 +4,8 @@ import lsdb
 import nested_pandas as npd
 import pytest
 
+from desi_aap.config import PipelineConfig
+
 TEST_DIR = Path(__file__).parent
 DATA_DIR_NAME = "data"
 DESI_DR1_COSMOS_PATH = "desi_dr1_cosmos"
@@ -42,3 +44,23 @@ def mock_desi_dr2_cosmos_catalog(mock_desi_dr2_cosmos_dir):
 def gold_standard_alerts(test_data_dir):
     """Snapshot of real BOOM alerts in the COSMOS field, for testing"""
     return npd.read_parquet(test_data_dir / GOLD_STANDARD_ALERTS_PATH)
+
+
+@pytest.fixture
+def pipeline_config(tmp_path, desi_dr1_cosmos_dir):
+    """A config wired to the COSMOS test catalog and a temp output directory."""
+    return PipelineConfig.model_validate(
+        {
+            "run": {"output_dir": str(tmp_path / "out")},
+            "query": {"boom": {"survey": "LSST"}, "window": {"lookback": "1h"}},
+            "crossmatch": {
+                "catalogs": {
+                    "desi_dr1": {
+                        "catalog": str(desi_dr1_cosmos_dir),
+                        "radius_arcsec": 5.0,
+                        "n_neighbors": 1,
+                    }
+                }
+            },
+        }
+    )

@@ -14,9 +14,8 @@ from astropy.time import Time
 
 from desi_aap import boom
 from desi_aap.config import PipelineConfig
-from desi_aap.stages.base import StageInputs, StageResult
+from desi_aap.stages.base import StageInputs, StageResult, write_frame
 from desi_aap.utils import run_stamp
-from desi_aap.utils.io import write_frame
 
 logger = logging.getLogger(__name__)
 

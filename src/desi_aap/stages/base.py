@@ -13,6 +13,7 @@ __all__ = [
     "StageInputs",
     "StageResult",
     "input_result",
+    "write_frame",
 ]
 
 
@@ -57,6 +58,28 @@ class StageResult:
 
 # Results of the stages that already ran this invocation, keyed by stage name.
 StageInputs = dict[str, StageResult]
+
+
+def write_frame(frame: npd.NestedFrame, path: Path) -> Path:
+    """Write a stage's frame to parquet, preserving its Arrow dtypes.
+
+    Read one back with :func:`nested_pandas.read_parquet`.
+
+    Parameters
+    ----------
+    frame : nested_pandas.NestedFrame
+        The table to write.
+    path : Path
+        Destination file. Parent directories are created.
+
+    Returns
+    -------
+    Path
+        The path written.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(path)
+    return path
 
 
 def input_result(inputs: StageInputs | None, producer: str) -> StageResult:

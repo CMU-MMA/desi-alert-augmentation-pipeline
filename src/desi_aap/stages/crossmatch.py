@@ -13,7 +13,6 @@ are kept and written (:func:`filter_matched`).
 """
 
 import logging
-import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,11 +23,10 @@ import nested_pandas as npd
 import pandas as pd
 
 from desi_aap.config import PipelineConfig
-from desi_aap.stages.base import StageInputs, StageResult, input_result
+from desi_aap.stages.base import StageInputs, StageResult, input_result, write_frame
 from desi_aap.stages.query import STAGE as QUERY_STAGE
 from desi_aap.utils import run_stamp
 from desi_aap.utils.dask_client import dask_client
-from desi_aap.utils.io import read_frame, write_frame
 
 logger = logging.getLogger(__name__)
 
@@ -67,41 +65,6 @@ class CatalogSpec:
     radius_arcsec: float
     n_neighbors: int = 1
     columns: list[str] | str | None = None
-
-
-def open_hats_catalog(
-    path: str | Path,
-    *,
-    columns: list[str] | str | None = None,
-) -> lsdb.Catalog:
-    """Open a HATS collection as a lazy LSDB catalog.
-
-    Nothing is read from disk here -- LSDB loads the catalog schema and defers
-    the data until a crossmatch is computed.
-
-    Parameters
-    ----------
-    path : str or Path
-        Path to the HATS *collection* directory (the one holding
-        ``collection.properties``); ``catalog`` in the config file. Pointing at
-        the inner catalog directory also works but skips the margin cache.
-    columns : list of str or str, optional
-        Subset of columns to load, passed straight to
-        :func:`lsdb.open_catalog`. None or ``"all"`` loads every column.
-
-    Returns
-    -------
-    lsdb.Catalog
-        The lazily-loaded catalog.
-    """
-    catalog = lsdb.open_catalog(path, columns=columns)
-    if catalog.margin is None:
-        warnings.warn(
-            f"Catalog at {path} has no margin cache; matches near partition "
-            "boundaries may be missed. Open the HATS collection directory instead of "
-            "the inner catalog directory to pick up the default margin."
-        )
-    return catalog
 
 
 def alerts_to_catalog(
@@ -191,7 +154,7 @@ def crossmatch_catalog(
         catalog = (
             spec.catalog
             if isinstance(spec.catalog, lsdb.Catalog)
-            else open_hats_catalog(spec.catalog, columns=spec.columns)
+            else lsdb.open_catalog(spec.catalog, columns=spec.columns)
         )
         logger.info(
             "Cross-matching against %r within %.2f arcsec (up to %d neighbour(s)).",
@@ -321,23 +284,6 @@ def catalog_specs(cfg: PipelineConfig) -> list[CatalogSpec]:
         )
         for name, entry in catalogs.items()
     ]
-
-
-def read_matches(path: Path | str) -> npd.NestedFrame:
-    """Read a written match file back into a nested-pandas frame.
-
-    Parameters
-    ----------
-    path : Path or str
-        A parquet file written by this stage.
-
-    Returns
-    -------
-    nested_pandas.NestedFrame
-        One row per matched alert, with one nested column per configured
-        catalog.
-    """
-    return read_frame(path)
 
 
 def run_crossmatch(
