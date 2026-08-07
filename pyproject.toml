@@ -24,7 +24,10 @@ dependencies = [
                        # dependency here, so it resolves to a current release even in the
                        # lowest-versions job, and an older healpy fails on import.
     "ligo-gracedb>=2.10",
-    "ligo.skymap>=1.0.7",
+    "ligo.skymap>=2.4.0",  # 2.4.0 drops python-ligo-lw/ligo-segments for igwn-segments;
+                       # ligo-segments has no macOS arm64 wheel and its C extension
+                       # fails to compile on Python 3.12
+    "lsdb>=0.10.4",
     "matplotlib>=3.6",
     "nested-pandas>=0.6",  # NestedFrame for list-of-struct alert fields; brings in pyarrow
     "numpy>=1.24",

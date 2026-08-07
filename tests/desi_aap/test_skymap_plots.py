@@ -8,13 +8,17 @@ from astropy.table import Table
 from desi_aap import skymap_plots
 
 # Every test rasterizes at this order rather than the module defaults. raster_3d_density_slice
-# allocates several (npix, DISTANCE_GRID_SIZE) float64 grids, so PLOT_HEALPIX_ORDER = 8 would
+# allocates several (npix, grid_size) float64 grids, so PLOT_HEALPIX_ORDER = 8 would
 # need tens of GB; order 2 is 192 pixels and runs in well under a second.
 TEST_HEALPIX_ORDER = 2
 
 SN_RA = 240.0
 SN_DEC = -20.0
 SN_DIST_MPC = 150.0
+
+# The credible level these tests plot at. Supplied explicitly everywhere rather than taken
+# from gracedb_tools, because skymap_plots now reads it from the crossmatch row it is given.
+TEST_CREDIBLE_LEVEL = 0.50
 
 
 @pytest.fixture(autouse=True)
@@ -87,6 +91,7 @@ def row_fixture():
             "searched_prob_dist": 0.47,
             "credible_area_deg2": 300.0,
             "credible_volume_mpc3": 2.0e6,
+            "credible_level": TEST_CREDIBLE_LEVEL,
             "gw_far_per_year": 1.43e-5,
             "gw_p_bns": 0.999,
             "gw_p_nsbh": 0.001,
@@ -158,7 +163,7 @@ def test_raster_prob_from_moc_leaves_an_empty_map_unnormalized() -> None:
 def test_raster_3d_density_slice_returns_a_density_and_threshold() -> None:
     """Verify `raster_3d_density_slice` returns a per-pixel density and a usable threshold"""
     density, threshold = skymap_plots.raster_3d_density_slice(
-        make_moc_skymap(), SN_DIST_MPC, order=TEST_HEALPIX_ORDER
+        make_moc_skymap(), SN_DIST_MPC, TEST_CREDIBLE_LEVEL, order=TEST_HEALPIX_ORDER
     )
 
     assert density.shape == (hp.nside2npix(hp.order2nside(TEST_HEALPIX_ORDER)),)
@@ -174,17 +179,51 @@ def test_raster_3d_density_slice_peaks_at_the_distance_posterior_mean() -> None:
     """Verify `raster_3d_density_slice` evaluates the Gaussian at the distance it is given"""
     skymap = make_moc_skymap()
 
-    at_mean, _ = skymap_plots.raster_3d_density_slice(skymap, SN_DIST_MPC, order=TEST_HEALPIX_ORDER)
-    far_away, _ = skymap_plots.raster_3d_density_slice(skymap, SN_DIST_MPC + 400.0, order=TEST_HEALPIX_ORDER)
+    at_mean, _ = skymap_plots.raster_3d_density_slice(
+        skymap, SN_DIST_MPC, TEST_CREDIBLE_LEVEL, order=TEST_HEALPIX_ORDER
+    )
+    far_away, _ = skymap_plots.raster_3d_density_slice(
+        skymap, SN_DIST_MPC + 400.0, TEST_CREDIBLE_LEVEL, order=TEST_HEALPIX_ORDER
+    )
 
     assert at_mean.max() > far_away.max()
+
+
+def test_raster_3d_density_slice_honors_the_grid_arguments() -> None:
+    """Verify `raster_3d_density_slice` integrates over the radial grid the caller asks for"""
+    skymap = make_moc_skymap()
+
+    def threshold(**kwargs):
+        return skymap_plots.raster_3d_density_slice(
+            skymap, SN_DIST_MPC, TEST_CREDIBLE_LEVEL, order=TEST_HEALPIX_ORDER, **kwargs
+        )[1]
+
+    # A coarser grid resolves the ranked density differently, and stopping the integration at
+    # the posterior mean rather than well beyond it leaves out probability the threshold needs.
+    assert threshold(grid_size=50) != pytest.approx(threshold(grid_size=1000))
+    assert threshold(distmean_multiplier=1.0) != pytest.approx(threshold(distmean_multiplier=6.0))
+
+
+def test_raster_3d_density_slice_rejects_too_small_a_grid() -> None:
+    """Verify `raster_3d_density_slice` rejects a grid_size that leaves no radial steps"""
+    # grid_size=1 makes np.arange(1, 1) empty, which used to surface as an opaque numpy
+    # "cannot call vectorize on size 0 inputs" from deep inside the cosmology conversion.
+    for grid_size in (1, 0, -5):
+        with pytest.raises(ValueError, match="grid_size must be at least 2"):
+            skymap_plots.raster_3d_density_slice(
+                make_moc_skymap(),
+                SN_DIST_MPC,
+                TEST_CREDIBLE_LEVEL,
+                order=TEST_HEALPIX_ORDER,
+                grid_size=grid_size,
+            )
 
 
 def test_raster_3d_density_slice_rejects_a_missing_distance() -> None:
     """Verify `raster_3d_density_slice` returns no slice when the SN distance is not finite"""
     for distance in (np.nan, np.inf):
         assert skymap_plots.raster_3d_density_slice(
-            make_moc_skymap(), distance, order=TEST_HEALPIX_ORDER
+            make_moc_skymap(), distance, TEST_CREDIBLE_LEVEL, order=TEST_HEALPIX_ORDER
         ) == (None, pytest.approx(np.nan, nan_ok=True))
 
 
@@ -195,12 +234,16 @@ def test_raster_3d_density_slice_rejects_unusable_skymaps() -> None:
 
     no_sigma = make_moc_skymap()
     no_sigma["DISTSIGMA"] = np.nan
-    density, threshold = skymap_plots.raster_3d_density_slice(no_sigma, SN_DIST_MPC, order=order)
+    density, threshold = skymap_plots.raster_3d_density_slice(
+        no_sigma, SN_DIST_MPC, TEST_CREDIBLE_LEVEL, order=order
+    )
     assert density is None
     assert np.isnan(threshold)
 
     no_prob = make_moc_skymap(probdensity=np.zeros(npix))
-    density, threshold = skymap_plots.raster_3d_density_slice(no_prob, SN_DIST_MPC, order=order)
+    density, threshold = skymap_plots.raster_3d_density_slice(
+        no_prob, SN_DIST_MPC, TEST_CREDIBLE_LEVEL, order=order
+    )
     assert density is None
     assert np.isnan(threshold)
 
@@ -248,7 +291,7 @@ def install_fast_plot(monkeypatch, drew_3d=True):
 
     read_sky_map is replaced so no FITS file is needed, and the rasterize and contour steps
     are replaced so the plot is built at TEST_HEALPIX_ORDER instead of PLOT_HEALPIX_ORDER,
-    whose (npix, DISTANCE_GRID_SIZE) grids are far too large for a unit test.
+    whose (npix, grid_size) grids are far too large for a unit test.
     """
     skymap = make_moc_skymap()
     rasterize = skymap_plots.raster_prob_from_moc
@@ -393,6 +436,38 @@ def test_plot_3d_coincidence_annotates_the_3d_distance(monkeypatch, tmp_path, ro
 
     labels = [text.get_text() for text in plt.gcf().legends[0].get_texts()]
     assert any(f"at {SN_DIST_MPC:.0f} Mpc" in label for label in labels)
+
+
+def test_plot_3d_coincidence_labels_the_rows_credible_level(monkeypatch, tmp_path, row, gw_events) -> None:
+    """Verify `plot_3d_coincidence` labels the contours at the row's credible_level, not a default"""
+    # The point of carrying credible_level on the row: a frame crossmatched at 90% must not
+    # be drawn or labelled at the 50% this module used to import from gracedb_tools.
+    install_fast_plot(monkeypatch, drew_3d=True)
+    row["credible_level"] = 0.90
+
+    skymap_plots.plot_3d_coincidence(row, gw_events, outdir=tmp_path, show=True)
+
+    labels = [text.get_text() for text in plt.gcf().legends[0].get_texts()]
+    assert any("90%" in label for label in labels)
+    assert not any("50%" in label for label in labels)
+
+
+def test_draw_contours_uses_the_rows_credible_level(monkeypatch, row) -> None:
+    """Verify `draw_contours` projects the 3D slice at the row's credible_level"""
+    skymap = make_moc_skymap()
+    prob = skymap_plots.raster_prob_from_moc(skymap, order=TEST_HEALPIX_ORDER)
+    levels = []
+
+    def fake_raster(passed_skymap, dl_mpc, contour_level, order=None):
+        levels.append(contour_level)
+        return None, np.nan
+
+    monkeypatch.setattr(skymap_plots, "raster_3d_density_slice", fake_raster)
+    row["credible_level"] = 0.90
+
+    skymap_plots.draw_contours(prob, skymap, row, order=TEST_HEALPIX_ORDER)
+
+    assert levels == [0.90]
 
 
 def test_plot_3d_coincidence_tolerates_missing_event_columns(monkeypatch, tmp_path, row, gw_events) -> None:
