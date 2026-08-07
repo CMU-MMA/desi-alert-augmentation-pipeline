@@ -29,17 +29,10 @@ PLOT_PROBABILITY_MIN = 0.0
 PLOT_BBOX_INCHES = "tight"
 PLOT_PERCENT_SCALE = 100
 
-# Projected 3D contour grid settings.
-DISTANCE_GRID_SIZE = 1000
-DISTANCE_GRID_DISTMEAN_MULTIPLIER = 6.0
-DISTANCE_GRID_SN_DISTANCE_MULTIPLIER = 1.05
-DISTANCE_SHELL_VARIANCE_DENOMINATOR = 12.0
-GAUSSIAN_EXPONENT_FACTOR = -0.5
-
 # HEALPix order for the projected 3D contour, deliberately coarser than PLOT_HEALPIX_ORDER.
-# raster_3d_density_slice allocates several (npix, DISTANCE_GRID_SIZE) float64 grids, so cost
-# rises 4x per order: order 6 needs a few GB, order 8 would need roughly 31 GB. Contours are
-# smooth enough that the coarser grid costs little in the drawn result.
+# raster_3d_density_slice allocates several (npix, grid_size) float64 grids, so cost rises 4x
+# per order: order 6 needs a few GB, order 8 would need roughly 31 GB. Contours are smooth
+# enough that the coarser grid costs little in the drawn result.
 CONTOUR_HEALPIX_ORDER = 6
 
 # Contour and marker styling.
@@ -111,7 +104,16 @@ def raster_prob_from_moc(skymap, order=PLOT_HEALPIX_ORDER):
     return prob
 
 
-def raster_3d_density_slice(skymap, dl_mpc, contour_level, order=PLOT_HEALPIX_ORDER):
+def raster_3d_density_slice(
+    skymap,
+    dl_mpc,
+    contour_level,
+    *,
+    order=PLOT_HEALPIX_ORDER,
+    grid_size=1000,
+    distmean_multiplier=6.0,
+    sn_distance_multiplier=1.05,
+):
     """Return an approximate projected 3D contour map at one distance.
 
 
@@ -126,6 +128,17 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level, order=PLOT_HEALPIX_OR
         Credible level the threshold should enclose.
     order : int, optional
         HEALPix order to rasterize to. Defaults to PLOT_HEALPIX_ORDER.
+    grid_size : int, optional
+        Number of radial steps the distance posterior is integrated over. Cost and memory
+        scale with it linearly, as several (npix, grid_size) float64 grids are allocated,
+        and so does the resolution of the credible-density threshold. Must be at least 2,
+        since the grid spans np.arange(1, grid_size). Defaults to 1000.
+    distmean_multiplier : float, optional
+        How many times the posterior's mean distance the radial grid extends to, so that the
+        integral captures essentially all the probability. Defaults to 6.0.
+    sn_distance_multiplier : float, optional
+        Floor on the grid's extent as a multiple of dl_mpc, so an SN beyond
+        distmean_multiplier * distmean still falls inside the grid. Defaults to 1.05.
 
     Returns
     -------
@@ -137,7 +150,20 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level, order=PLOT_HEALPIX_OR
     density_threshold : float
         Density bounding the contour_level region, or NaN whenever density_at_distance is
         None.
+
+    Raises
+    ------
+    ValueError
+        If grid_size is below 2. Raised rather than reported as an unavailable slice,
+        because the None return above is reserved for skymaps that cannot support one,
+        whereas too small a grid is a mistake in the call.
     """
+    # np.arange(1, 1) is empty, and an empty radial grid reaches dVC_dVL_for_DL, whose
+    # np.vectorize rejects size-0 input with a message about otypes that says nothing about
+    # the real cause. clean_tns_catalog documents the same numpy behaviour.
+    if grid_size < 2:
+        raise ValueError(f"grid_size must be at least 2 to give a radial grid, got {grid_size}")
+
     raster = moc.rasterize(skymap, order=order)
     nside = hp.npix2nside(len(raster))
     dA = np.full(len(raster), hp.nside2pixarea(nside))
@@ -163,18 +189,20 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level, order=PLOT_HEALPIX_OR
     dP[valid] = dP_dA[valid] * dA[valid]
     distmean, _ = distance.parameters_to_marginal_moments(dP[valid], mu[valid], sigma[valid])
 
-    max_r = max(
-        DISTANCE_GRID_DISTMEAN_MULTIPLIER * distmean,
-        DISTANCE_GRID_SN_DISTANCE_MULTIPLIER * dl_mpc,
-    )
+    max_r = max(distmean_multiplier * distmean, sn_distance_multiplier * dl_mpc)
     if not np.isfinite(max_r) or max_r <= 0:
         return None, np.nan
-    d_r = max_r / DISTANCE_GRID_SIZE
-    r = d_r * np.arange(1, DISTANCE_GRID_SIZE)
+    d_r = max_r / grid_size
+    r = d_r * np.arange(1, grid_size)
 
-    dV = (np.square(r) + np.square(d_r) / DISTANCE_SHELL_VARIANCE_DENOMINATOR) * d_r * dA.reshape(-1, 1)
+    # Variance of a uniform distribution across the shell's width, which is what the second
+    # term of the exact shell integral is: integrating r^2 dr from r - d_r/2 to r + d_r/2
+    # gives d_r * (r^2 + d_r^2 / 12), so the 12 follows from the geometry rather than tuning.
+    shell_width_variance = np.square(d_r) / 12.0
+    dV = (np.square(r) + shell_width_variance) * d_r * dA.reshape(-1, 1)
+    # exp(-z^2 / 2), the Gaussian each pixel's distance posterior is modelled as.
     radial_density = np.exp(
-        GAUSSIAN_EXPONENT_FACTOR * np.square((r.reshape(1, -1) - mu.reshape(-1, 1)) / sigma.reshape(-1, 1))
+        -0.5 * np.square((r.reshape(1, -1) - mu.reshape(-1, 1)) / sigma.reshape(-1, 1))
     ) * (dP_dA * norm / (sigma * np.sqrt(2 * np.pi))).reshape(-1, 1)
     dP_grid = radial_density * dV
     dP_grid[~np.isfinite(dP_grid)] = 0
@@ -196,7 +224,8 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level, order=PLOT_HEALPIX_OR
     threshold_idx = min(np.searchsorted(cumulative_prob, target_prob), len(ranked_density) - 1)
     density_threshold = ranked_density[threshold_idx]
 
-    density_at_distance = np.exp(GAUSSIAN_EXPONENT_FACTOR * np.square((dl_mpc - mu) / sigma)) * (
+    # The same Gaussian as above, evaluated at the SN's distance rather than across the grid.
+    density_at_distance = np.exp(-0.5 * np.square((dl_mpc - mu) / sigma)) * (
         dP_dA * norm / (sigma * np.sqrt(2 * np.pi))
     )
     if USE_COMOVING_VOLUME_RANKING:

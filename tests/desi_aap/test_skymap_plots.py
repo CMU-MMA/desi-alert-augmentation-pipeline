@@ -8,7 +8,7 @@ from astropy.table import Table
 from desi_aap import skymap_plots
 
 # Every test rasterizes at this order rather than the module defaults. raster_3d_density_slice
-# allocates several (npix, DISTANCE_GRID_SIZE) float64 grids, so PLOT_HEALPIX_ORDER = 8 would
+# allocates several (npix, grid_size) float64 grids, so PLOT_HEALPIX_ORDER = 8 would
 # need tens of GB; order 2 is 192 pixels and runs in well under a second.
 TEST_HEALPIX_ORDER = 2
 
@@ -189,6 +189,36 @@ def test_raster_3d_density_slice_peaks_at_the_distance_posterior_mean() -> None:
     assert at_mean.max() > far_away.max()
 
 
+def test_raster_3d_density_slice_honors_the_grid_arguments() -> None:
+    """Verify `raster_3d_density_slice` integrates over the radial grid the caller asks for"""
+    skymap = make_moc_skymap()
+
+    def threshold(**kwargs):
+        return skymap_plots.raster_3d_density_slice(
+            skymap, SN_DIST_MPC, TEST_CREDIBLE_LEVEL, order=TEST_HEALPIX_ORDER, **kwargs
+        )[1]
+
+    # A coarser grid resolves the ranked density differently, and stopping the integration at
+    # the posterior mean rather than well beyond it leaves out probability the threshold needs.
+    assert threshold(grid_size=50) != pytest.approx(threshold(grid_size=1000))
+    assert threshold(distmean_multiplier=1.0) != pytest.approx(threshold(distmean_multiplier=6.0))
+
+
+def test_raster_3d_density_slice_rejects_too_small_a_grid() -> None:
+    """Verify `raster_3d_density_slice` rejects a grid_size that leaves no radial steps"""
+    # grid_size=1 makes np.arange(1, 1) empty, which used to surface as an opaque numpy
+    # "cannot call vectorize on size 0 inputs" from deep inside the cosmology conversion.
+    for grid_size in (1, 0, -5):
+        with pytest.raises(ValueError, match="grid_size must be at least 2"):
+            skymap_plots.raster_3d_density_slice(
+                make_moc_skymap(),
+                SN_DIST_MPC,
+                TEST_CREDIBLE_LEVEL,
+                order=TEST_HEALPIX_ORDER,
+                grid_size=grid_size,
+            )
+
+
 def test_raster_3d_density_slice_rejects_a_missing_distance() -> None:
     """Verify `raster_3d_density_slice` returns no slice when the SN distance is not finite"""
     for distance in (np.nan, np.inf):
@@ -261,7 +291,7 @@ def install_fast_plot(monkeypatch, drew_3d=True):
 
     read_sky_map is replaced so no FITS file is needed, and the rasterize and contour steps
     are replaced so the plot is built at TEST_HEALPIX_ORDER instead of PLOT_HEALPIX_ORDER,
-    whose (npix, DISTANCE_GRID_SIZE) grids are far too large for a unit test.
+    whose (npix, grid_size) grids are far too large for a unit test.
     """
     skymap = make_moc_skymap()
     rasterize = skymap_plots.raster_prob_from_moc
