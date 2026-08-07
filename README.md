@@ -81,7 +81,7 @@ A dry run still writes its log - it is the point of the exercise:
 ```
 BOOM returned 327 alerts.
 Dry run: not writing the alerts.
-Crossmatch summary: {'n_alerts': 327, 'desi_dr1': {'n_alerts_matched': 8, ...}}
+Crossmatch summary: {'n_alerts': 327, 'n_matches_desi_dr1': 8, 'n_alerts_matched': 8}
 Dry run: not writing the matches.
 ```
 

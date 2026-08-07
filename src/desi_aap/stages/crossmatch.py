@@ -234,15 +234,16 @@ def summarize_matches(
     Returns
     -------
     dict
-        Alerts in, alerts matching at least one catalog, and per-catalog counts
-        of both matched alerts and total matches.
+        Alerts in, how many matched each catalog (``n_matches_<name>``), and
+        how many matched at least one. Every value is a count of *alerts*, so
+        an alert matching several sources in one catalog still counts once.
     """
     summary: dict[str, Any] = {"n_alerts": len(alerts)}
     matched_any = pd.Series(False, index=matches.index)
     for name in names:
         counts = match_counts(matches, name)
         matched_any |= counts > 0
-        summary[name] = {"n_alerts_matched": int((counts > 0).sum()), "n_matches": int(counts.sum())}
+        summary[f"n_matches_{name}"] = int((counts > 0).sum())
     summary["n_alerts_matched"] = int(matched_any.sum())
     return summary
 
@@ -333,8 +334,6 @@ def run_crossmatch(
         logger.info("No alerts to cross-match; writing nothing.")
         return StageResult(stage=STAGE, frame=None, stamp=stamp, summary={"n_alerts": 0})
 
-    # The alerts have to become a catalog before they can be matched:
-    # crossmatch_nested is a Catalog method with no DataFrame equivalent.
     with dask_client(cfg.dask_for(STAGE)):
         matched = crossmatch_catalog(alerts_to_catalog(alerts), specs)
         matches = matched.compute().reset_index(drop=True)

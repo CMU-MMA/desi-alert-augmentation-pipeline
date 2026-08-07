@@ -37,7 +37,7 @@ def test_run_crossmatch(pipeline_config, alert_inputs, stub_boom):
 
     assert result.summary["n_alerts"] == 327
     assert result.summary["n_alerts_matched"] == 8
-    assert result.summary["desi_dr1"] == {"n_alerts_matched": 8, "n_matches": 8}
+    assert result.summary["n_matches_desi_dr1"] == 8
 
     output_path = pipeline_config.run.stage_dir(STAGE) / "matches_20260807T120000Z.parquet"
     assert result.output_path == output_path
@@ -134,4 +134,4 @@ def test_summarize_reports_zero_when_nothing_matched(gold_standard_alerts):
 
     assert summary["n_alerts"] == 327
     assert summary["n_alerts_matched"] == 0
-    assert summary["desi_dr1"]["n_matches"] == 0
+    assert summary["n_matches_desi_dr1"] == 0
