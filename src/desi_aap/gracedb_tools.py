@@ -25,10 +25,19 @@ from desi_aap.cosmology import COSMOLOGIES
 SECONDS_PER_DAY = (1 * u.day).to_value(u.s)
 JULIAN_YEAR_SECONDS = (1 * u.yr).to_value(u.s)
 
-# crossmatch(..., cosmology=False) ranks the 3D posterior by probability
-# density per luminosity-distance volume, matching the units in the skymaps.
-# The two cosmology runs differ by the redshift-to-luminosity-distance
-# conversion used for each SN.
+# crossmatch's `cosmology` flag chooses how the 3D posterior is ranked, and with it
+# what the volume columns mean (ligo.skymap 2.5.4):
+#
+#   False  ranks by probability density per luminosity-distance volume, matching the
+#          units in the skymaps, and reports Euclidean luminosity-distance volumes.
+#   True   ranks by probability density per unit comoving volume, scaling each voxel
+#          by dVC_dVL_for_DL(r) first, and reports comoving volumes.
+#
+# The flag moves searched_vol_mpc3, searched_prob_vol, probdensity_vol and
+# credible_volume_mpc3, and so inside_3d_credible_level with them; it is applied after
+# the 2D and distance-marginal quantities are computed, which are unaffected. Distinct
+# from COSMOLOGIES despite the name: the two cosmology runs differ by the
+# redshift-to-luminosity-distance conversion used for each SN, not by this flag.
 USE_COMOVING_VOLUME_RANKING = True
 
 # Local output directory for downloaded skymaps.
@@ -618,6 +627,102 @@ def temporal_crossmatch_sesn_to_gw(
     )
 
 
+def summarize_temporal_matches(temporal_matches, gw_events):
+    """Count the temporally matched SNe for each superevent, as a column on the event table.
+
+    Answers "which events had anything nearby in time, and how much?" over the whole scan,
+    including the events nothing matched, which is why it reads gw_events rather than
+    counting temporal_matches alone: an event with no match contributes no rows there and
+    would otherwise vanish from the tally.
+
+    Parameters
+    ----------
+    temporal_matches : pandas.DataFrame
+        Output of temporal_crossmatch_sesn_to_gw, one row per (SN, event) pair. Counted by
+        the (superevent_id, gw_time) pair it copies from gw_events, so an SN matched to two
+        events counts once against each.
+    gw_events : pandas.DataFrame
+        Superevent table from fetch_gracedb_superevents. Every row is kept, matched or not.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy of gw_events, in its order, with one integer column added:
+
+        n_temporal_sesn
+            Number of SNe that matched the event in time; 0 for an event none matched, and
+            for the stub row of an event whose file listing could not be read, which
+            carries no gw_time to match on.
+
+        Empty DataFrame if gw_events is empty, since there is then nothing to count
+        against, regardless of what temporal_matches holds.
+
+    Examples
+    --------
+    A trimmed view of the result, showing an event that two SNe matched and one that none
+    did::
+
+        superevent_id  gw_time                           far_per_year  p_bns  n_temporal_sesn
+        S190425z       2019-04-25 08:18:05.017147+00:00      1.43e-05  0.999                2
+        S190814bv      2019-08-14 21:11:16.012957+00:00      6.41e-26  0.000                0
+    """
+    if gw_events.empty:
+        return pd.DataFrame()
+
+    if temporal_matches.empty:
+        # Short-circuited rather than merged against an empty frame of counts, for two
+        # reasons. temporal_crossmatch_sesn_to_gw returns a bare DataFrame() when nothing
+        # matched, which has no columns at all, so grouping it would raise KeyError; and an
+        # empty frame built with the key names holds them as object dtype, which merges
+        # without complaint but leaves a column that fillna then downcasts, which pandas
+        # 2.3 deprecates. Assigning the zero directly sidesteps both.
+        summary = gw_events.copy()
+        summary["n_temporal_sesn"] = 0
+        return summary
+
+    group_keys = ["superevent_id", "gw_time"]
+    counts = temporal_matches.groupby(group_keys, dropna=False).size().rename("n_temporal_sesn").reset_index()
+    summary = gw_events.merge(counts, on=group_keys, how="left")
+    # The misses come back as NaN, which makes the column type float; the counts are whole.
+    summary["n_temporal_sesn"] = summary["n_temporal_sesn"].fillna(0).astype(int)
+    return summary
+
+
+def display_temporal_summary(summary):
+    """Narrow a temporal summary to the columns worth reading, for display.
+
+    A convenience for the end of a scan, kept separate from summarize_temporal_matches so
+    that the full frame stays available to anything working with the result rather than
+    looking at it.
+
+    Parameters
+    ----------
+    summary : pandas.DataFrame
+        Output of summarize_temporal_matches. Names it does not carry are skipped rather
+        than raising, since an empty scan returns a frame with no columns at all.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A view of summary holding the columns below that exist, in this order.
+    """
+    # In reading order: what the event is, how loud and how likely, and how many SNe fell
+    # in its window.
+    columns = (
+        "superevent_id",
+        "gw_time",
+        "far_per_year",
+        "p_bns",
+        "p_nsbh",
+        "pipeline",
+        "search",
+        "skymap_file",
+        "n_temporal_sesn",
+        "status",
+    )
+    return summary[[c for c in columns if c in summary.columns]]
+
+
 def add_crossmatch_columns(sn_rows, result, *, cosmology_label, distance_column, credible_level):
     """Attach ligo.skymap crossmatch result fields to a copy of the matched SN rows.
 
@@ -852,3 +957,106 @@ def run_3d_spatial_crossmatch(temporal_matches, gw_events, *, credible_level=0.5
     if sort_cols:
         df = df.sort_values(sort_cols)
     return df.reset_index(drop=True)
+
+
+def select_coincidences(spatial_matches, *, require_2d_credible_level=False):
+    """Keep the crossmatched rows whose SN landed inside the GW credible volume.
+
+    The final cut of the pipeline: what survives here is the candidate list.
+
+    Parameters
+    ----------
+    spatial_matches : pandas.DataFrame
+        Output of run_3d_spatial_crossmatch, one row per (SN, event, cosmology). Rows whose
+        spatial_status is not "ok" are dropped, so an event whose skymap was missing or
+        unreadable contributes nothing rather than contributing an unmeasured row.
+    require_2d_credible_level : bool, optional
+        Whether a row must fall inside the 2D credible level as well as the 3D one.
+        Defaults to False, because the two are not nested quantities: searched_prob_vol can
+        be well inside the contour while searched_prob_2d is outside it, for an SN whose
+        sky position is unremarkable but whose distance lands on a high-density slice of
+        the distance posterior. Requiring both therefore discards real 3D coincidences,
+        which is a defensible thing to want but not the default.  #TODO: Check with Xander about default.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The surviving rows with their index reset and their columns unchanged. Since the
+        input holds one row per cosmology, an SN inside the volume under both cosmologies
+        appears twice and one inside under only a single cosmology appears once, which is
+        the signal that it sits near the edge. Empty DataFrame if spatial_matches is empty
+        or does not carry the columns the cut reads, as it will not when every superevent
+        failed before its crossmatch.
+
+    Examples
+    --------
+    A trimmed view of the result, showing an SN inside the volume under one cosmology but
+    not the other::
+
+        name     superevent_id  cosmology  sn_dist_mpc  searched_prob_3d_density_rank
+        2019ebq  S190425z       Planck18         168.5                          0.312
+    """
+    required = {"spatial_status", "inside_3d_credible_level"}
+    if require_2d_credible_level:
+        required.add("inside_2d_credible_level")
+    if spatial_matches.empty or not required.issubset(spatial_matches.columns):
+        return pd.DataFrame()
+
+    # .eq(True) rather than the column read as a mask directly: run_3d_spatial_crossmatch
+    # concatenates groups that may not all carry these columns, and pandas fills a missing
+    # one with NaN, leaving object dtype that cannot index a frame. NaN.eq(True) is False,
+    # which is the right reading for a row the crossmatch never measured.
+    inside = spatial_matches["inside_3d_credible_level"].eq(True)
+    if require_2d_credible_level:
+        inside &= spatial_matches["inside_2d_credible_level"].eq(True)
+    return spatial_matches[spatial_matches["spatial_status"].eq("ok") & inside].reset_index(drop=True)
+
+
+def display_coincidences(coincidences):
+    """Narrow a coincidence list to the columns worth reading, for display.
+
+    A convenience for the end of a scan, kept separate from select_coincidences so that the
+    full frame stays available: skymap_plots.plot_3d_coincidence reads a row's skymap_path
+    and credible_level, neither of which is shown here.
+
+    Parameters
+    ----------
+    coincidences : pandas.DataFrame
+        Output of select_coincidences. Names it does not carry are skipped rather than
+        raising, since these span several stages: a run whose skymaps all failed to read
+        has no searched_prob_2d, and an empty result has no columns at all.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A view of coincidences holding the columns below that exist, in this order.
+    """
+    # In reading order: the event, then the SN, then the measurements the cut was made on,
+    # then the coordinates needed to follow the candidate up.
+    columns = (
+        "superevent_id",
+        "gw_time",
+        "gw_far_per_year",
+        "gw_p_bns",
+        "gw_p_nsbh",
+        "name",
+        "type",
+        "discoverydate",
+        "days_from_gw",
+        "redshift",
+        "cosmology",
+        "sn_dist_mpc",
+        "searched_prob_2d",
+        "searched_prob_3d_density_rank",
+        "searched_prob_dist",
+        "searched_area_deg2",
+        "credible_area_deg2",
+        "credible_volume_mpc3",
+        "inside_2d_credible_level",
+        "inside_3d_credible_level",
+        "ra",
+        "declination",
+        "reporting_group",
+        "internal_names",
+    )
+    return coincidences[[c for c in columns if c in coincidences.columns]]
