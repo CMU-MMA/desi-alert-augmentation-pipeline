@@ -33,7 +33,7 @@ dependencies = [
     "lsdb>=0.10.4", # Crossmatching
     "pyarrow>=16",  # Parquet reading and writing
     "pydantic>=2.0", # Validates the TOML configuration file
-    "typer", # Command-line entry point
+    "typer>=0.16",  # Command-line entry point
     "requests>=2.28",
 ]
 
