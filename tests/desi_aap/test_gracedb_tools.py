@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+
 from desi_aap import gracedb_tools
 from desi_aap.cosmology import COSMOLOGIES
 
@@ -1051,3 +1052,154 @@ def test_run_3d_spatial_crossmatch_returns_empty_frames(temporal_matches) -> Non
 
     assert gracedb_tools.run_3d_spatial_crossmatch(pd.DataFrame(), gw_events).empty
     assert gracedb_tools.run_3d_spatial_crossmatch(matches, pd.DataFrame()).empty
+
+
+def test_summarize_temporal_matches_counts_each_event(df_sesn, gw_events) -> None:
+    """Verify `summarize_temporal_matches` counts the SNe that matched each superevent"""
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+
+    summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
+
+    assert summary["n_temporal_sesn"].tolist() == [2]
+    assert summary["superevent_id"].tolist() == gw_events["superevent_id"].tolist()
+
+
+def test_summarize_temporal_matches_keeps_unmatched_events(df_sesn, gw_events) -> None:
+    """Verify `summarize_temporal_matches` keeps an event no SN matched, counted as zero"""
+    quiet = gw_events.copy()
+    quiet.loc[0, "superevent_id"] = "S190814bv"
+    quiet.loc[0, "gw_time"] = GW190425_UTC + pd.Timedelta(days=365)
+    events = pd.concat([gw_events, quiet], ignore_index=True)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, events)
+
+    summary = gracedb_tools.summarize_temporal_matches(matches, events)
+
+    assert summary["n_temporal_sesn"].tolist() == [2, 0]
+    assert summary["superevent_id"].tolist() == ["S190425z", "S190814bv"]
+
+
+def test_summarize_temporal_matches_preserves_the_event_columns(df_sesn, gw_events) -> None:
+    """Verify `summarize_temporal_matches` adds its column without disturbing the others"""
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+
+    summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
+
+    assert list(summary.columns) == [*gw_events.columns, "n_temporal_sesn"]
+    pd.testing.assert_frame_equal(summary[gw_events.columns], gw_events)
+
+
+def test_summarize_temporal_matches_counts_zero_when_nothing_matched(gw_events) -> None:
+    """Verify `summarize_temporal_matches` handles the bare frame an empty match returns"""
+    summary = gracedb_tools.summarize_temporal_matches(pd.DataFrame(), gw_events)
+
+    assert summary["n_temporal_sesn"].tolist() == [0]
+    assert summary["n_temporal_sesn"].dtype == int
+
+
+def test_summarize_temporal_matches_returns_an_empty_frame(df_sesn, gw_events) -> None:
+    """Verify `summarize_temporal_matches` returns an empty frame when there are no events"""
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+
+    assert gracedb_tools.summarize_temporal_matches(matches, pd.DataFrame()).empty
+
+
+@pytest.fixture(name="spatial_matches")
+def spatial_matches_fixture():
+    """Four crossmatched rows spanning every combination of the two credible-level flags."""
+    return pd.DataFrame(
+        {
+            "name": ["inside_both", "inside_3d_only", "inside_2d_only", "outside_both"],
+            "spatial_status": ["ok"] * 4,
+            "inside_2d_credible_level": [True, False, True, False],
+            "inside_3d_credible_level": [True, True, False, False],
+        }
+    )
+
+
+def test_select_coincidences_keeps_the_3d_matches(spatial_matches) -> None:
+    """Verify `select_coincidences` cuts on the 3D flag alone by default"""
+    kept = gracedb_tools.select_coincidences(spatial_matches)
+
+    assert kept["name"].tolist() == ["inside_both", "inside_3d_only"]
+    assert kept.index.tolist() == list(range(len(kept)))
+
+
+def test_select_coincidences_can_require_the_2d_level(spatial_matches) -> None:
+    """Verify `select_coincidences` also cuts on the 2D flag when asked to"""
+    kept = gracedb_tools.select_coincidences(spatial_matches, require_2d_credible_level=True)
+
+    assert kept["name"].tolist() == ["inside_both"]
+
+
+def test_select_coincidences_drops_failed_crossmatches(spatial_matches) -> None:
+    """Verify `select_coincidences` drops rows whose spatial_status is not "ok" """
+    spatial_matches.loc[0, "spatial_status"] = "missing_skymap"
+
+    kept = gracedb_tools.select_coincidences(spatial_matches)
+
+    assert kept["name"].tolist() == ["inside_3d_only"]
+
+
+def test_select_coincidences_treats_an_unmeasured_flag_as_outside(spatial_matches) -> None:
+    """Verify `select_coincidences` reads the NaN left by a missing column as outside"""
+    spatial_matches["inside_3d_credible_level"] = [True, np.nan, np.nan, np.nan]
+
+    kept = gracedb_tools.select_coincidences(spatial_matches)
+
+    assert kept["name"].tolist() == ["inside_both"]
+
+
+def test_select_coincidences_returns_an_empty_frame(spatial_matches) -> None:
+    """Verify `select_coincidences` returns an empty frame when the cut columns are absent"""
+    assert gracedb_tools.select_coincidences(pd.DataFrame()).empty
+    assert gracedb_tools.select_coincidences(spatial_matches.drop(columns="spatial_status")).empty
+    assert gracedb_tools.select_coincidences(spatial_matches.drop(columns="inside_3d_credible_level")).empty
+    # The 2D column is only required when the cut actually reads it.
+    without_2d = spatial_matches.drop(columns="inside_2d_credible_level")
+    assert not gracedb_tools.select_coincidences(without_2d).empty
+    assert gracedb_tools.select_coincidences(without_2d, require_2d_credible_level=True).empty
+
+
+def test_display_temporal_summary_shows_the_summary_columns(df_sesn, gw_events) -> None:
+    """Verify `display_temporal_summary` keeps the columns it finds, in its own order"""
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
+
+    shown = gracedb_tools.display_temporal_summary(summary)
+
+    assert list(shown.columns) == [
+        "superevent_id",
+        "gw_time",
+        "far_per_year",
+        "p_bns",
+        "p_nsbh",
+        "pipeline",
+        "search",
+        "skymap_file",
+        "n_temporal_sesn",
+        "status",
+    ]
+    assert shown["n_temporal_sesn"].tolist() == [2]
+
+
+def test_display_temporal_summary_skips_absent_names(gw_events) -> None:
+    """Verify `display_temporal_summary` drops a name the frame lacks rather than raising"""
+    summary = gracedb_tools.summarize_temporal_matches(pd.DataFrame(), gw_events)
+
+    shown = gracedb_tools.display_temporal_summary(summary.drop(columns=["pipeline", "status"]))
+
+    assert "pipeline" not in shown.columns
+    assert "status" not in shown.columns
+    assert "n_temporal_sesn" in shown.columns
+    assert gracedb_tools.display_temporal_summary(pd.DataFrame()).empty
+
+
+def test_display_coincidences_shows_the_coincidence_columns(spatial_matches) -> None:
+    """Verify `display_coincidences` keeps the columns it finds and drops the rest"""
+    kept = gracedb_tools.select_coincidences(spatial_matches)
+
+    shown = gracedb_tools.display_coincidences(kept)
+
+    # spatial_status and the two flags are in the frame; only the flags are worth showing.
+    assert list(shown.columns) == ["name", "inside_2d_credible_level", "inside_3d_credible_level"]
+    assert gracedb_tools.display_coincidences(pd.DataFrame()).empty
