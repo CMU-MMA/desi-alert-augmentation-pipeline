@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     help="DESI Alert Augmentation Pipeline -- cross-match broker alerts with DESI "
-     "spectroscopy, score them against known GW event localizations, and publish "
-     "the best follow-up candidates",
+    "spectroscopy, score them against known GW event localizations, and publish "
+    "the best follow-up candidates",
     no_args_is_help=True,
 )
 

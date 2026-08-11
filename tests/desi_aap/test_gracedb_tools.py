@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+
 from desi_aap import gracedb_tools
 from desi_aap.cosmology import COSMOLOGIES
 
