@@ -56,7 +56,6 @@ def run(
 
     timestamp = run_stamp()
     log_path = log_file or run_log_path(cfg.run.output_dir, timestamp)
-    logger.info(f"Logging to {log_path}")
     setup_logging(log_path, verbose=verbose)
 
     try:

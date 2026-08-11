@@ -29,7 +29,7 @@ def resolve_window(
     start: boom.TimeLike | None,
     end: boom.TimeLike | None,
     *,
-    lookback: timedelta,
+    lookback: timedelta | None,
 ) -> tuple[float, float]:
     """Decide which Julian-date window this run should cover.
 
@@ -55,6 +55,9 @@ def resolve_window(
     ValueError
         If the resolved start is after the resolved end.
     """
+    if lookback is None and (start is None or end is None):
+        raise ValueError("a lookback is required to fill in a missing start or end.")
+
     end_jd = boom._to_jd(end) if end is not None else float(Time.now().jd)
     start_jd = boom._to_jd(start) if start is not None else end_jd - lookback.total_seconds() / 86400.0
 
