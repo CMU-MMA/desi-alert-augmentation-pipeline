@@ -58,7 +58,17 @@ class WindowConfig(_Section):
 
     start: datetime | float | str | None = None
     end: datetime | float | str | None = None
-    lookback: Duration
+    lookback: Duration | None = None
+
+    @model_validator(mode="after")
+    def _check_window(self) -> "WindowConfig":
+        """Require a lookback for any bound not given explicitly."""
+        if self.lookback is None and (self.start is None or self.end is None):
+            raise ValueError(
+                "give 'lookback', or both 'start' and 'end'. A lookback fills in "
+                "whichever bound is not given."
+            )
+        return self
 
 
 class CrossmatchCatalogConfig(_Section):
@@ -92,7 +102,6 @@ class QueryConfig(_Section):
 
     boom: BoomConfig
     window: WindowConfig
-    dask: DaskConfig = DaskConfig()
 
 
 class CrossmatchConfig(_Section):
