@@ -152,8 +152,11 @@ _html/
 # Claude Code
 .claude/
 
-# Downloaded GraceDB skymaps (see SKYMAP_DIR in src/desi_aap/gracedb_tools.py)
-gracedb_skymaps/
+# Pipeline results (see output_dir under [run] in config.toml)
+output/
+
+# Cached GraceDB metadata and skymaps (see cache_dir under [gracedb] in config.toml)
+gracedb_cache/
 
 # Generated plots (see PLOT_DIR in src/desi_aap/skymap_plots.py)
 gracedb_sesn_3d_plots/

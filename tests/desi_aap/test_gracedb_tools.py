@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+from astropy.time import Time
 
 from desi_aap import gracedb_tools
 from desi_aap.cosmology import COSMOLOGIES
@@ -71,6 +72,7 @@ class FakeGraceDbClient:
         self._payloads = payloads or {}
         self._errors = errors or {}
         self.queries = []
+        self.listings = []
         self.downloads = []
 
     def superevents(self, query=None, max_results=None):
@@ -84,6 +86,7 @@ class FakeGraceDbClient:
         if key in self._errors:
             raise self._errors[key]
         if filename is None:
+            self.listings.append(superevent_id)
             return FakeJsonResponse(self._files_by_id[superevent_id])
         self.downloads.append((superevent_id, filename))
         return FakeFileResponse(self._payloads[(superevent_id, filename)])
@@ -446,9 +449,8 @@ def install_fake_client(monkeypatch, client):
     return constructed
 
 
-def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` returns one row per passing superevent"""
-    monkeypatch.chdir(tmp_path)
     superevent = make_superevent()
     files = {"gstlal.p_astro.json": "url", "bilby.multiorder.fits": "url"}
     payloads = {
@@ -458,7 +460,7 @@ def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path) -> None:
     client = FakeGraceDbClient([superevent], {"S190425z": files}, payloads=payloads)
     constructed = install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert len(df) == 1
     row = df.iloc[0]
@@ -475,17 +477,17 @@ def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path) -> None:
     assert row["labels"] == "PE_READY,SKYMAP_READY"
     assert row["skymap_file"] == "bilby.multiorder.fits"
     assert row["status"] == "ok"
-    expected_path = gracedb_tools.SKYMAP_DIR / "S190425z__bilby.multiorder.fits"
-    assert row["skymap_path"] == str(expected_path)
+    assert row["cache_status"] == "miss"
+    expected_path = superevent_cache.skymap_dir / "S190425z__bilby.multiorder.fits"
+    assert row["skymap_path"] == str(expected_path.resolve())
     assert expected_path.read_bytes() == b"FITS"
     assert constructed == [((), {"service_url": "https://gracedb.ligo.org/api/"})]
     expected_far_hz = 2.0 / gracedb_tools.JULIAN_YEAR_SECONDS
     assert client.queries == [(f"category: Production far < {expected_far_hz:.12g}", None)]
 
 
-def test_fetch_gracedb_superevents_drops_loud_events(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_drops_loud_events(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` applies the FAR cut before reading any file"""
-    monkeypatch.chdir(tmp_path)
     superevents = [
         make_superevent("S190425z", far=LOUD_FAR_HZ),
         make_superevent("S190426c", far=None, preferred_event_data={}),
@@ -493,13 +495,14 @@ def test_fetch_gracedb_superevents_drops_loud_events(monkeypatch, tmp_path) -> N
     client = FakeGraceDbClient(superevents, {})
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"]).empty
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
     assert client.downloads == []
 
 
-def test_fetch_gracedb_superevents_falls_back_to_the_preferred_far(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_falls_back_to_the_preferred_far(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify `fetch_gracedb_superevents` uses the preferred event's FAR when the superevent's is None"""
-    monkeypatch.chdir(tmp_path)
     superevent = make_superevent(far=QUIET_FAR_HZ)
     superevent["far"] = None
     superevent["t_0"] = None
@@ -508,16 +511,17 @@ def test_fetch_gracedb_superevents_falls_back_to_the_preferred_far(monkeypatch, 
     client = FakeGraceDbClient([superevent], {"S190425z": files}, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert df.iloc[0]["far_hz"] == QUIET_FAR_HZ
     assert df.iloc[0]["gps_time"] == GW190425_GPS
     assert df.iloc[0]["gw_time"] == GW190425_UTC
 
 
-def test_fetch_gracedb_superevents_applies_the_classification_cut(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_applies_the_classification_cut(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify `fetch_gracedb_superevents` keeps only superevents clearing the classification cut"""
-    monkeypatch.chdir(tmp_path)
     superevents = [make_superevent("S190425z"), make_superevent("S190521g")]
     files_by_id = {sid: {"p_astro.json": "url"} for sid in ("S190425z", "S190521g")}
     payloads = {
@@ -527,13 +531,18 @@ def test_fetch_gracedb_superevents_applies_the_classification_cut(monkeypatch, t
     client = FakeGraceDbClient(superevents, files_by_id, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"])["superevent_id"].tolist() == ["S190425z"]
-    assert gracedb_tools.fetch_gracedb_superevents(["bbh"])["superevent_id"].tolist() == ["S190521g"]
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])[
+        "superevent_id"
+    ].tolist() == ["S190425z"]
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bbh"])[
+        "superevent_id"
+    ].tolist() == ["S190521g"]
 
 
-def test_fetch_gracedb_superevents_honors_the_classification_cut_argument(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_honors_the_classification_cut_argument(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify `fetch_gracedb_superevents` applies a caller-supplied min_classification_prob_sum"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient(
         [make_superevent()],
         {"S190425z": {"p_astro.json": "url"}},
@@ -542,13 +551,23 @@ def test_fetch_gracedb_superevents_honors_the_classification_cut_argument(monkey
     install_fake_client(monkeypatch, client)
 
     # BNS_PASTRO has p_bns 0.95, so it clears the 0.9 default but not a 0.99 cut.
-    assert len(gracedb_tools.fetch_gracedb_superevents(["bns"], min_classification_prob_sum=0.5)) == 1
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"], min_classification_prob_sum=0.99).empty
+    assert (
+        len(
+            gracedb_tools.fetch_gracedb_superevents(
+                cache=superevent_cache, se_types=["bns"], min_classification_prob_sum=0.5
+            )
+        )
+        == 1
+    )
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache, se_types=["bns"], min_classification_prob_sum=0.99
+    ).empty
 
 
-def test_fetch_gracedb_superevents_honors_the_far_threshold_argument(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_honors_the_far_threshold_argument(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify `fetch_gracedb_superevents` applies far_threshold_per_year to the query and the rows"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient(
         [make_superevent(far=QUIET_FAR_HZ)],
         {"S190425z": {"p_astro.json": "url"}},
@@ -558,25 +577,27 @@ def test_fetch_gracedb_superevents_honors_the_far_threshold_argument(monkeypatch
 
     # QUIET_FAR_HZ is ~0.03 per year, so a cut below that drops it locally as well as in
     # the query string the fake client records but does not act on.
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"], far_threshold_per_year=0.001).empty
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache, se_types=["bns"], far_threshold_per_year=0.001
+    ).empty
     expected_far_hz = 0.001 / gracedb_tools.JULIAN_YEAR_SECONDS
     assert client.queries == [(f"category: Production far < {expected_far_hz:.12g}", None)]
 
 
-def test_fetch_gracedb_superevents_passes_max_results_through(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_passes_max_results_through(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify `fetch_gracedb_superevents` forwards max_results to the GraceDB query"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient([], {})
     install_fake_client(monkeypatch, client)
 
-    gracedb_tools.fetch_gracedb_superevents(["bns"], max_results=5)
+    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"], max_results=5)
 
     assert client.queries[0][1] == 5
 
 
-def test_fetch_gracedb_superevents_sums_requested_types(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_sums_requested_types(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` adds the probabilities of every requested type"""
-    monkeypatch.chdir(tmp_path)
     split = {"BNS": 0.5, "NSBH": 0.45, "BBH": 0.02, "Terrestrial": 0.03}
     client = FakeGraceDbClient(
         [make_superevent()],
@@ -585,17 +606,18 @@ def test_fetch_gracedb_superevents_sums_requested_types(monkeypatch, tmp_path) -
     )
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"]).empty
-    assert len(gracedb_tools.fetch_gracedb_superevents(["bns", "nsbh"])) == 1
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+    assert len(gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns", "nsbh"])) == 1
 
 
-def test_fetch_gracedb_superevents_records_a_file_list_failure(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_records_a_file_list_failure(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify `fetch_gracedb_superevents` keeps a stub row when the file listing cannot be read"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient([make_superevent()], {}, errors={"S190425z": RuntimeError("gracedb is down")})
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert len(df) == 1
     row = df.iloc[0]
@@ -606,9 +628,8 @@ def test_fetch_gracedb_superevents_records_a_file_list_failure(monkeypatch, tmp_
     assert "p_bns" not in df.columns
 
 
-def test_fetch_gracedb_superevents_sorts_a_stub_row_last(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_sorts_a_stub_row_last(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify a file_list_failed stub survives the gw_time sort next to a normal row"""
-    monkeypatch.chdir(tmp_path)
     superevents = [make_superevent("S190426c"), make_superevent("S190425z")]
     client = FakeGraceDbClient(
         superevents,
@@ -618,16 +639,17 @@ def test_fetch_gracedb_superevents_sorts_a_stub_row_last(monkeypatch, tmp_path) 
     )
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert df["superevent_id"].tolist() == ["S190425z", "S190426c"]
     assert pd.isna(df.iloc[1]["gw_time"])
     assert pd.isna(df.iloc[1]["p_bns"])
 
 
-def test_fetch_gracedb_superevents_drops_unreadable_classifications(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_drops_unreadable_classifications(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify a superevent whose p_astro cannot be read is dropped by the probability cut"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient(
         [make_superevent()],
         {"S190425z": {"p_astro.json": "url"}},
@@ -635,12 +657,11 @@ def test_fetch_gracedb_superevents_drops_unreadable_classifications(monkeypatch,
     )
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"]).empty
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
 
 
-def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` keeps the row when only the skymap download fails"""
-    monkeypatch.chdir(tmp_path)
     files = {"p_astro.json": "url", "bilby.multiorder.fits": "url"}
     client = FakeGraceDbClient(
         [make_superevent()],
@@ -650,7 +671,7 @@ def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_pat
     )
     install_fake_client(monkeypatch, client)
 
-    row = gracedb_tools.fetch_gracedb_superevents(["bns"]).iloc[0]
+    row = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).iloc[0]
 
     assert row["status"] == "skymap_download_failed: 404"
     assert row["skymap_file"] == "bilby.multiorder.fits"
@@ -658,9 +679,8 @@ def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_pat
     assert row["p_bns"] == 0.95
 
 
-def test_fetch_gracedb_superevents_handles_a_missing_skymap(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_handles_a_missing_skymap(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` reports status ok when the listing has no skymap"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient(
         [make_superevent()],
         {"S190425z": {"p_astro.json": "url"}},
@@ -668,16 +688,15 @@ def test_fetch_gracedb_superevents_handles_a_missing_skymap(monkeypatch, tmp_pat
     )
     install_fake_client(monkeypatch, client)
 
-    row = gracedb_tools.fetch_gracedb_superevents(["bns"]).iloc[0]
+    row = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).iloc[0]
 
     assert row["status"] == "ok"
     assert row["skymap_file"] is None
     assert row["skymap_path"] is None
 
 
-def test_fetch_gracedb_superevents_sorts_by_gw_time(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_sorts_by_gw_time(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` returns rows in chronological order"""
-    monkeypatch.chdir(tmp_path)
     superevents = [
         make_superevent("S190814bv", t_0=GW190425_GPS + 9_000_000),
         make_superevent("S190425z", t_0=GW190425_GPS),
@@ -687,18 +706,17 @@ def test_fetch_gracedb_superevents_sorts_by_gw_time(monkeypatch, tmp_path) -> No
     client = FakeGraceDbClient(superevents, files_by_id, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert df["superevent_id"].tolist() == ["S190425z", "S190814bv"]
     assert df.index.tolist() == [0, 1]
 
 
-def test_fetch_gracedb_superevents_returns_an_empty_frame(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_returns_an_empty_frame(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` returns an empty DataFrame when nothing passes"""
-    monkeypatch.chdir(tmp_path)
     install_fake_client(monkeypatch, FakeGraceDbClient([], {}))
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert isinstance(df, pd.DataFrame)
     assert df.empty
@@ -1203,3 +1221,117 @@ def test_display_coincidences_shows_the_coincidence_columns(spatial_matches) -> 
     # spatial_status and the two flags are in the frame; only the flags are worth showing.
     assert list(shown.columns) == ["name", "inside_2d_credible_level", "inside_3d_credible_level"]
     assert gracedb_tools.display_coincidences(pd.DataFrame()).empty
+
+
+# ---------------------------------------------------------------------------
+# Caching. These exercise fetch_gracedb_superevents against a warm cache; the
+# cache's own rules are unit-tested in test_gracedb_cache.py.
+# ---------------------------------------------------------------------------
+
+
+def recent_gps(*, days_ago):
+    """GPS seconds for a merger that happened days_ago, i.e. inside the default recheck window."""
+    return float(Time.now().gps) - days_ago * gracedb_tools.SECONDS_PER_DAY
+
+
+def bns_client(files=None, superevents=None):
+    """Build a fake client for one passing BNS superevent with a p_astro and a skymap."""
+    files = files or {
+        "gstlal.p_astro.json": "url",
+        "bilby.multiorder.fits": "url",
+        "bilby.multiorder.fits,0": "url",
+    }
+    payloads = {
+        ("S190425z", "gstlal.p_astro.json"): json.dumps(BNS_PASTRO).encode(),
+        ("S190425z", "bilby.multiorder.fits"): b"FITS",
+    }
+    return FakeGraceDbClient(
+        superevents if superevents is not None else [make_superevent()],
+        {"S190425z": files},
+        payloads=payloads,
+    )
+
+
+def test_fetch_gracedb_superevents_serves_a_second_run_from_cache(monkeypatch, superevent_cache) -> None:
+    """Verify a warm cache makes `fetch_gracedb_superevents` issue no per-superevent requests"""
+    client = bns_client()
+    install_fake_client(monkeypatch, client)
+
+    first = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    downloads_after_first = list(client.downloads)
+    second = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+
+    assert first.iloc[0]["cache_status"] == "miss"
+    assert second.iloc[0]["cache_status"] == "hit"
+    # Nothing further was downloaded: no p_astro, no skymap, and no file listing either.
+    assert client.downloads == downloads_after_first
+    # The rows themselves are unchanged apart from the status naming what the cache did.
+    columns = [c for c in first.columns if c != "cache_status"]
+    pd.testing.assert_frame_equal(first[columns], second[columns])
+
+
+def test_fetch_gracedb_superevents_caches_a_superevent_that_fails_the_cut(
+    monkeypatch, superevent_cache
+) -> None:
+    """Verify a superevent dropped by the classification cut is still cached"""
+    client = FakeGraceDbClient(
+        [make_superevent("S190521g")],
+        {"S190521g": {"p_astro.json": "url"}},
+        payloads={("S190521g", "p_astro.json"): json.dumps(BBH_PASTRO).encode()},
+    )
+    install_fake_client(monkeypatch, client)
+
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+    downloads_after_first = list(client.downloads)
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+
+    # Most superevents clearing the FAR cut fail this one, so caching them is most of the saving.
+    assert superevent_cache.read_entry("S190521g") is not None
+    assert client.downloads == downloads_after_first
+
+
+def test_fetch_gracedb_superevents_refetches_when_a_listed_field_moves(monkeypatch, superevent_cache) -> None:
+    """Verify a changed label re-reads the file listing and flags a stale fingerprint"""
+    install_fake_client(monkeypatch, bns_client())
+    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+
+    changed = make_superevent(labels=["PE_READY", "SKYMAP_READY", "ADVOK"])
+    client = bns_client(superevents=[changed])
+    install_fake_client(monkeypatch, client)
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+
+    assert df.iloc[0]["cache_status"] == "stale_fingerprint"
+    # The listing was re-read, which is the whole point of noticing the moved field. Nothing was
+    # downloaded from it, because the listing came back identical -- see the test below.
+    assert client.listings == ["S190425z"]
+    assert client.downloads == []
+
+
+# The file listing of a superevent whose skymap has been superseded: the unversioned name still
+# resolves, but now points at revision 1. This is the shape S250206dm has on the live API.
+REVISED_FILES = {
+    "gstlal.p_astro.json": "url",
+    "bilby.multiorder.fits": "url",
+    "bilby.multiorder.fits,0": "url",
+    "bilby.multiorder.fits,1": "url",
+}
+
+
+def test_fetch_gracedb_superevents_redownloads_a_superseded_skymap(monkeypatch, superevent_cache) -> None:
+    """Verify a bumped ",N" revision re-downloads the skymap behind an unchanged name"""
+    # Inside the recheck window, which is when revisions actually land: a skymap is reissued in
+    # the hours and days after an event, not years later.
+    recent = make_superevent(t_0=recent_gps(days_ago=2))
+    install_fake_client(monkeypatch, bns_client(superevents=[recent]))
+    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    skymap = superevent_cache.skymap_dir / "S190425z__bilby.multiorder.fits"
+    assert skymap.read_bytes() == b"FITS"
+
+    client = bns_client(files=REVISED_FILES, superevents=[recent])
+    client._payloads[("S190425z", "bilby.multiorder.fits")] = b"FITS REVISION 1"
+    install_fake_client(monkeypatch, client)
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+
+    assert df.iloc[0]["cache_status"] == "stale_age"
+    assert skymap.read_bytes() == b"FITS REVISION 1"
+    assert superevent_cache.read_entry("S190425z")["skymap_revision"] == 1

@@ -44,3 +44,21 @@ n_neighbors = 1
 catalog = "/ocean/projects/phy250012p/shared/3DTS/DESI/dr2/desi_dr2_zcat"
 radius_arcsec = 5.0
 n_neighbors = 1
+
+# ===========================================================================
+# GraceDB -- superevent metadata and skymap cache.
+# Read by desi_aap.gracedb_tools; not a pipeline stage yet, so nothing in
+# `desi-aap run` touches this section.
+# ===========================================================================
+
+[gracedb]
+# Relative, like output_dir above, so a fresh clone works anywhere with no
+# setup. It follows the working directory, so a scheduled run must start from
+# the same place every time or it will quietly build a second cache -- see the
+# crontab example in the README. Give an absolute path in your own overlay
+# file if you would rather not rely on that.
+cache_dir = "gracedb_cache"
+# Superevents whose merger is more recent than this are re-checked on every
+# run even when nothing in the GraceDB listing has changed, since a file can
+# be uploaded without moving any field the listing reports.
+recheck_window = "30d"

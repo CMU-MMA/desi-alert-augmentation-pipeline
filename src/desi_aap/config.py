@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
 from desi_aap.boom import parse_timedelta
+from desi_aap.gracedb_cache import GraceDbCache
 
 
 class ConfigError(ValueError):
@@ -97,6 +98,41 @@ class DaskConfig(_Section):
         return {"kwargs": data}
 
 
+class GraceDbConfig(_Section):
+    """The ``[gracedb]`` section: where the GraceDB cache lives and how stale it may get."""
+
+    # config.toml sets this and wins; the default is only what a config carrying no [gracedb]
+    # section falls back to. Relative -- to pin it, pass to_cache a root.
+    cache_dir: Path = Path("gracedb_cache")
+    # None means "whatever GraceDbCache defaults to", so the window is written in exactly one
+    # place. Spelling the number here as well would let the two drift apart silently.
+    recheck_window: Duration | None = None
+    service_url: str = "https://gracedb.ligo.org/api/"
+
+    def to_cache(self, root: Path | None = None) -> GraceDbCache:
+        """Build the cache this section describes.
+
+        Parameters
+        ----------
+        root : Path, optional
+            Directory a relative ``cache_dir`` is resolved against. Without it a relative
+            path follows the working directory. Pass the repository root from anywhere that
+            does not run from it. An absolute ``cache_dir`` ignores this.
+
+        Returns
+        -------
+        GraceDbCache
+            The cache, with the recheck window left at its own default when this section
+            does not name one.
+        """
+        cache_dir = self.cache_dir
+        if root is not None and not cache_dir.is_absolute():
+            cache_dir = Path(root) / cache_dir
+        if self.recheck_window is None:
+            return GraceDbCache(cache_dir=cache_dir)
+        return GraceDbCache(cache_dir=cache_dir, recheck_window=self.recheck_window)
+
+
 class QueryConfig(_Section):
     """The ``[query]`` section: what that stage queries, and over what window."""
 
@@ -129,6 +165,7 @@ class PipelineConfig(_Section):
     query: QueryConfig
     crossmatch: CrossmatchConfig = CrossmatchConfig()
     dask: DaskConfig = DaskConfig()
+    gracedb: GraceDbConfig = GraceDbConfig()
 
     def dask_for(self, stage: str) -> dict[str, Any]:
         """Client arguments for one stage: the global ``[dask]``, then its own ``[<stage>.dask]``."""
