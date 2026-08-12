@@ -161,6 +161,10 @@ gracedb_cache/
 # Generated plots (see PLOT_DIR in src/desi_aap/skymap_plots.py)
 gracedb_sesn_3d_plots/
 
+# Demo script and output
+run_demo.sh
+demo_output/
+
 # Data and figure outputs
 *.fits
 *.fits.gz
