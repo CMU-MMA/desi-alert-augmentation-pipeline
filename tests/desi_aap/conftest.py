@@ -6,6 +6,7 @@ import pytest
 
 from desi_aap import boom
 from desi_aap.config import PipelineConfig
+from desi_aap.gracedb_cache import GraceDbCache
 
 TEST_DIR = Path(__file__).parent
 DATA_DIR_NAME = "data"
@@ -17,6 +18,17 @@ GOLD_STANDARD_ALERTS_PATH = "gold_standard_alerts.parquet"
 @pytest.fixture
 def test_data_dir():
     return Path(TEST_DIR) / DATA_DIR_NAME
+
+
+@pytest.fixture
+def superevent_cache(tmp_path):
+    """A GraceDB cache rooted under tmp_path, so no test depends on the working directory.
+
+    Named for what it holds rather than for its module, since a fixture in conftest is
+    visible to the whole suite and `gracedb_cache` is the module several of these tests
+    reach through for `superevent_fingerprint` and friends.
+    """
+    return GraceDbCache(cache_dir=tmp_path / "gracedb_cache")
 
 
 @pytest.fixture

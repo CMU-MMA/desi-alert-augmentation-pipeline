@@ -19,6 +19,13 @@ from ligo.skymap.io import read_sky_map
 from ligo.skymap.postprocess import crossmatch
 
 from desi_aap.cosmology import COSMOLOGIES
+from desi_aap.gracedb_cache import (
+    SKYMAP_SUBDIR,
+    atomic_write_bytes,
+    latest_revision,
+    safe_file_part,
+    superevent_fingerprint,
+)
 
 # Time-unit conversions, used for the false-alarm rates GraceDB reports in Hz and for
 # the SN-to-GW offsets. astropy's yr is the Julian year, 365.25 days.
@@ -39,9 +46,6 @@ JULIAN_YEAR_SECONDS = (1 * u.yr).to_value(u.s)
 # from COSMOLOGIES despite the name: the two cosmology runs differ by the
 # redshift-to-luminosity-distance conversion used for each SN, not by this flag.
 USE_COMOVING_VOLUME_RANKING = True
-
-# Local output directory for downloaded skymaps.
-SKYMAP_DIR = Path("gracedb_skymaps")
 
 # Rank given to names that are not skymaps at all. The rest of the skymap file-selection
 # priorities are local to skymap_priority; this one is shared because choose_skymap_file
@@ -285,29 +289,27 @@ def choose_skymap_file(files):
     return sorted(candidates, key=lambda name: (skymap_priority(name), name.lower()))[0]
 
 
-def safe_file_part(value):
-    """Sanitize a value for use as part of a local file name.
-
-    Parameters
-    ----------
-    value : object
-        Value to sanitize; converted with str() first.
-
-    Returns
-    -------
-    str
-        The string with each run of characters outside [A-Za-z0-9_.-] replaced by a single
-        underscore.
-    """
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value))
-
-
-def download_gracedb_file(client, superevent_id, filename, outdir=SKYMAP_DIR):
+def download_gracedb_file(client, superevent_id, filename, outdir, *, force=False):
     """Download a GraceDB file to a local cache directory, skipping if already present.
 
-    The local name is "<superevent_id>__<filename>" with both parts sanitized, so files
-    from different superevents never collide. An existing file is trusted and not
-    re-downloaded, which makes repeat runs of fetch_gracedb_superevents cheap.
+    The local name is "<superevent_id>__<filename>" with both parts sanitized, so files from
+    different superevents never collide. An existing file is reused, which makes repeat runs of
+    fetch_gracedb_superevents cheap.
+
+    Two things existence alone does not establish, both handled by the caller rather than here:
+
+    The file may have been superseded. GraceDB points an unversioned name at the newest revision
+    of that file, so the bytes behind "bayestar.multiorder.fits" change when a new one is uploaded,
+    and a copy taken beforehand stays stale forever. fetch_gracedb_superevents compares the
+    revision recorded in the cache entry against latest_revision of the current listing and passes
+    force=True when it has moved.
+
+    The file may be truncated. Writing goes through atomic_write_bytes, so a run killed partway
+    through leaves no file rather than a partial one; a copy written before that was true is not
+    detectable here and must be deleted by hand.
+    # TODO for Xander: skymaps downloaded before this change carry no recorded revision, so the
+    # first run adopts them as they are. Delete the skymap directory once if you want them all
+    # re-fetched at known revisions.
 
     Parameters
     ----------
@@ -317,21 +319,24 @@ def download_gracedb_file(client, superevent_id, filename, outdir=SKYMAP_DIR):
         Superevent identifier, e.g. "S190425z".
     filename : str
         Remote file name to fetch, e.g. "bilby.multiorder.fits".
-    outdir : pathlib.Path, optional
-        Directory to write into, created if it does not exist. Defaults to SKYMAP_DIR,
-        which is relative to the working directory.
+    outdir : pathlib.Path
+        Directory to write into, created if it does not exist. Required rather than defaulted:
+        a module-level default resolved against the working directory is what let the same
+        skymaps be downloaded into two different notebook directories. Normally
+        GraceDbCache.skymap_dir.
+    force : bool, optional
+        Download even when a local copy exists, replacing it. Defaults to False.
 
     Returns
     -------
     pathlib.Path
         Path to the local copy of the file.
     """
-    outdir.mkdir(exist_ok=True)
     local_name = f"{safe_file_part(superevent_id)}__{safe_file_part(filename)}"
     path = outdir / local_name
-    if not path.exists():
+    if force or not path.exists():
         payload = response_to_bytes(client.files(superevent_id, filename))
-        path.write_bytes(payload)
+        atomic_write_bytes(path, payload)
     return path
 
 
@@ -362,14 +367,27 @@ def gps_to_utc(gps_time):
 def fetch_gracedb_superevents(
     se_types,
     *,
+    cache,
     far_threshold_per_year=2.0,
     min_classification_prob_sum=0.9,
     max_results=None,
+    force_refresh=False,
 ):
     """Query GraceDB for superevents passing the FAR and classification cuts.
 
     Per-superevent failures are not fatal. They are recorded in the row's status column and
     the scan continues.
+
+    The superevents() listing is always fetched live; the per-superevent work behind it -- the
+    file listing, the p_astro download and the skymap download -- is served from cache when it
+    can be. That split is deliberate. The listing is a handful of requests against roughly two
+    per superevent, and it is the signal every freshness decision is made from, so keeping it
+    live means a retracted, backfilled or re-ranked superevent is noticed with no way for the
+    cache to drift. See desi_aap.gracedb_cache for what is stored and how staleness is judged.
+
+    A superevent that fails the classification cut is still cached, so the next run does not
+    re-download the p_astro that will fail it again. Only the skymap, which is the expensive
+    part, waits until a superevent has passed every cut.
 
     Parameters
     ----------
@@ -378,6 +396,10 @@ def fetch_gracedb_superevents(
         class names. Supported values: "bns", "nsbh", "bbh". Only superevents whose
         combined probability for the requested types exceeds min_classification_prob_sum
         are returned.
+    cache : desi_aap.gracedb_cache.GraceDbCache
+        Where the per-superevent metadata and the skymaps are kept. Required, and with no
+        default anywhere in the call chain, so the location is always an explicit decision;
+        build one from the pipeline config with GraceDbConfig.to_cache().
     far_threshold_per_year : float, optional
         False-alarm-rate cut in events per Julian year. Applied twice: once in the GraceDB
         query itself, converted to the Hz the API expects, and once locally, since a
@@ -389,6 +411,12 @@ def fetch_gracedb_superevents(
     max_results : int or None, optional
         Cap on the number of superevents the query returns, passed straight to
         GraceDb.superevents(). None, the default, means no cap.
+    force_refresh : bool, optional
+        Re-fetch every superevent from GraceDB and overwrite its cache entry and its skymap,
+        ignoring what is already stored. Defaults to False. This is the way to repair a cache
+        believed to hold wrong bytes rather than merely old ones: deleting an entry file
+        re-reads that superevent's metadata, but leaves its skymap in place, since nothing in
+        a re-read listing says the local copy is damaged.
 
     Returns
     -------
@@ -415,24 +443,32 @@ def fetch_gracedb_superevents(
             The superevent's GraceDB labels, comma-joined.
         skymap_file, skymap_path
             Chosen remote skymap name, and the local path it was downloaded to, or None if
-            there was no skymap or the download failed.
+            there was no skymap or the download failed. The path is absolute so that
+            run_3d_spatial_crossmatch and skymap_plots can open it directly: neither is given
+            the cache, so neither has a root to resolve a relative path against.
         status
             "ok", or the reason the superevent was only partly processed: either
             "file_list_failed: ..." or "skymap_download_failed: ...". A superevent whose
             p_astro could not be read is dropped by the probability cut rather than
             returned, so that failure never appears here.  #TODO is this the desired behavior?
+        cache_status
+            What the cache did for this superevent: "hit" (no per-superevent request made),
+            "miss" (nothing was cached), "stale_fingerprint" (a field the listing reports had
+            moved), "stale_age" (younger than the cache's recheck window, so re-checked on
+            principle) or "forced" (force_refresh was set). Reported so a scheduled run can be
+            confirmed to be using the cache without watching the network.
 
         Superevents whose file listing could not be read appear with only superevent_id,
-        far_hz, far_per_year and status set; their other columns are NaN. Empty DataFrame
-        if nothing passes the cuts.
+        far_hz, far_per_year, status and cache_status set; their other columns are NaN. Empty
+        DataFrame if nothing passes the cuts.
 
     Examples
     --------
     A trimmed view of the result, one row per superevent::
 
-        superevent_id  gw_time                           far_per_year  p_bns  p_nsbh  status
-        S190425z       2019-04-25 08:18:05.011549+00:00      1.43e-05  0.999   0.000  ok
-        S190814bv      2019-08-14 21:11:16.012957+00:00      6.41e-26  0.000   0.998  ok
+        superevent_id  gw_time                           far_per_year  p_bns  p_nsbh  status  cache_status
+        S190425z       2019-04-25 08:18:05.011549+00:00      1.43e-05  0.999   0.000  ok      hit
+        S190814bv      2019-08-14 21:11:16.012957+00:00      6.41e-26  0.000   0.998  ok      hit
     """
     service_url = "https://gracedb.ligo.org/api/"
     category = "Production"
@@ -451,6 +487,9 @@ def fetch_gracedb_superevents(
     classification_keys = [t.upper() for t in se_types]
     client = GraceDb(service_url=service_url)
     rows = []
+    # Taken once so every superevent in a scan is judged against the same clock, rather than
+    # against one that drifts across a run long enough for it to matter.
+    now = pd.Timestamp.now(tz="UTC")
 
     for superevent in client.superevents(query=query, max_results=max_results):
         sid = superevent.get("superevent_id")
@@ -460,51 +499,114 @@ def fetch_gracedb_superevents(
         if not np.isfinite(far_per_year) or far_per_year >= far_threshold_per_year:
             continue
 
-        try:
-            files = client.files(sid).json()
-        except Exception as exc:
-            # gw_time is set explicitly because it is the sort key below. Without it, a
-            # scan whose superevents all fail here builds a frame with no gw_time column
-            # at all and the sort raises KeyError; a stub alongside a normal row only
-            # works because pandas fills the column in for it.
-            rows.append(
-                {
-                    "superevent_id": sid,
-                    "gw_time": pd.NaT,
-                    "status": f"file_list_failed: {exc}",
-                    "far_hz": far_hz,
-                    "far_per_year": far_per_year,
-                }
-            )
-            continue
+        # Resolved before the file work rather than just before the row is built, because the
+        # cache's age backstop is judged on the merger time.
+        gps_time = as_float(superevent.get("t_0"), as_float(preferred.get("gpstime")))
+        gw_time = gps_to_utc(gps_time)
 
-        pastro_file = choose_pastro_file(superevent, files)
-        try:
-            classification, classification_file = load_classification(client, sid, pastro_file)
-        except Exception as exc:
-            classification = {}
-            classification_file = pastro_file
-            status = f"p_astro_failed: {exc}"
+        cached = None if force_refresh else cache.read_entry(sid)
+        cache_status = (
+            "forced" if force_refresh else cache.status(cached, superevent, gw_time=gw_time, now=now)
+        )
+
+        if cache_status == "hit":
+            file_names = list(cached["files"])
         else:
-            status = "ok"
+            try:
+                file_names = sorted(client.files(sid).json())
+            except Exception as exc:
+                # gw_time is set explicitly because it is the sort key below. Without it, a
+                # scan whose superevents all fail here builds a frame with no gw_time column
+                # at all and the sort raises KeyError; a stub alongside a normal row only
+                # works because pandas fills the column in for it.
+                rows.append(
+                    {
+                        "superevent_id": sid,
+                        "gw_time": pd.NaT,
+                        "status": f"file_list_failed: {exc}",
+                        "far_hz": far_hz,
+                        "far_per_year": far_per_year,
+                        "cache_status": cache_status,
+                    }
+                )
+                continue
+
+        # A re-check that finds the listing unchanged still saves the p_astro download, which is
+        # the common case inside the recheck window: the superevent was looked at again because
+        # it is young, not because anything about it moved.
+        listing_unchanged = cached is not None and list(cached.get("files") or []) == file_names
+
+        if cache_status == "hit" or listing_unchanged:
+            classification = cached.get("classification") or {}
+            classification_file = cached.get("classification_file")
+            classification_error = cached.get("classification_error")
+        else:
+            pastro_file = choose_pastro_file(superevent, file_names)
+            try:
+                classification, classification_file = load_classification(client, sid, pastro_file)
+            except Exception as exc:
+                classification = {}
+                classification_file = pastro_file
+                classification_error = str(exc)
+            else:
+                classification_error = None
+        # Replayed from the cache rather than recorded as "ok", so a cached failure reads the same
+        # as a fresh one instead of quietly becoming a clean row on the next run.
+        status = f"p_astro_failed: {classification_error}" if classification_error else "ok"
+
+        entry = {
+            "superevent_id": sid,
+            # When the data was fetched, not when it was last confirmed current: a hit leaves the
+            # entry untouched, so this stays the age of the bytes rather than of the check.
+            "fetched_utc": now.isoformat(),
+            "fingerprint": superevent_fingerprint(superevent),
+            "files": file_names,
+            "classification": classification,
+            "classification_file": classification_file,
+            "classification_error": classification_error,
+            "skymap_file": None,
+            "skymap_revision": None,
+            "skymap_relpath": None,
+        }
 
         prob_sum = sum(
             as_float(classification.get(key), default_classification_probability)
             for key in classification_keys
         )
         if not (prob_sum > min_classification_prob_sum):  # TODO - is this how we want to approach
+            # The entry is written even though this superevent is being dropped. Failing the
+            # cut cost the same two requests as passing it would have, and this cut rejects
+            # most of what the FAR cut admits -- 334 of 349 against the production API in
+            # August 2026 -- so not caching the failures would give up most of the saving.
+            if cache_status != "hit":
+                cache.write_entry(sid, entry)
             continue
 
-        skymap_file = choose_skymap_file(files)
+        skymap_file = choose_skymap_file(file_names)
         skymap_path = None
         if skymap_file:
+            skymap_revision = latest_revision(file_names, skymap_file)
+            entry["skymap_file"] = skymap_file
+            entry["skymap_revision"] = skymap_revision
+            # GraceDB repoints an unversioned name at each new revision, so a local copy taken
+            # before one was uploaded is stale even though the name still matches. force_refresh
+            # replaces it too: it is the documented way to recover a skymap whose bytes are
+            # wrong rather than merely old, which no revision comparison can detect.
+            superseded = cached is not None and cached.get("skymap_revision") != skymap_revision
             try:
-                skymap_path = download_gracedb_file(client, sid, skymap_file)
+                skymap_path = download_gracedb_file(
+                    client, sid, skymap_file, cache.skymap_dir, force=force_refresh or superseded
+                )
             except Exception as exc:
                 status = f"skymap_download_failed: {exc}"
+            else:
+                entry["skymap_relpath"] = (Path(SKYMAP_SUBDIR) / skymap_path.name).as_posix()
 
-        gps_time = as_float(superevent.get("t_0"), as_float(preferred.get("gpstime")))
-        gw_time = gps_to_utc(gps_time)
+        # A hit can still write: an earlier failed skymap download has retried successfully here.
+        # A failure writes too, keeping the metadata that worked; only the download is retried.
+        if cache_status != "hit" or entry["skymap_relpath"] != (cached or {}).get("skymap_relpath"):
+            cache.write_entry(sid, entry)
+
         rows.append(
             {
                 "superevent_id": sid,
@@ -525,8 +627,9 @@ def fetch_gracedb_superevents(
                 "instruments": preferred.get("instruments"),
                 "labels": ",".join(superevent.get("labels", [])),
                 "skymap_file": skymap_file,
-                "skymap_path": str(skymap_path) if skymap_path else None,
+                "skymap_path": str(cache.resolve(entry["skymap_relpath"])) if skymap_path else None,
                 "status": status,
+                "cache_status": cache_status,
             }
         )
 
