@@ -602,7 +602,9 @@ def fetch_gracedb_superevents(
             else:
                 entry["skymap_relpath"] = (Path(SKYMAP_SUBDIR) / skymap_path.name).as_posix()
 
-        if cache_status != "hit":
+        # A hit can still write: an earlier failed skymap download has retried successfully here.
+        # A failure writes too, keeping the metadata that worked; only the download is retried.
+        if cache_status != "hit" or entry["skymap_relpath"] != (cached or {}).get("skymap_relpath"):
             cache.write_entry(sid, entry)
 
         rows.append(

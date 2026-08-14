@@ -107,7 +107,6 @@ class GraceDbConfig(_Section):
     # None means "whatever GraceDbCache defaults to", so the window is written in exactly one
     # place. Spelling the number here as well would let the two drift apart silently.
     recheck_window: Duration | None = None
-    service_url: str = "https://gracedb.ligo.org/api/"
 
     def to_cache(self, root: Path | None = None) -> GraceDbCache:
         """Build the cache this section describes.
