@@ -1,0 +1,240 @@
+"""Post each run's matched alerts to a Slack channel.
+
+The stage takes the frame the previous stage produced, renders it as a short
+message -- a summary line, the first ``[slack].max_rows`` alerts as a
+fixed-width table, and a pointer to the full parquet output -- and posts it
+with the Slack Web API's ``chat.postMessage``.
+
+Posting needs a *bot token*: register an app on https://api.slack.com/apps
+with the ``chat:write`` scope, install it to the workspace, and put the
+resulting ``xoxb-`` token in a TOML file (``bot_token = "xoxb-..."``) outside
+the repository. The ``[slack]`` section names that file, the channel, and the
+row cutoff; the section is optional, and the stage skips itself when it is
+absent. The bot must be invited to the channel once (``/invite @<bot>``).
+
+The pipeline stops before this stage when an earlier one produces no rows, so
+a run with nothing to report posts nothing by design.
+"""
+
+import logging
+import tomllib
+from pathlib import Path
+
+import nested_pandas as npd
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+
+from desi_aap.config import PipelineConfig
+from desi_aap.stages.base import StageInputs, StageResult, input_result
+from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
+from desi_aap.utils import run_stamp
+
+logger = logging.getLogger(__name__)
+
+STAGE = "slack_publish"
+
+# The stage whose frame gets published. As stages are added between crossmatch
+# and this one, point this at the new last data stage.
+INPUT_STAGE = CROSSMATCH_STAGE
+
+# Flat columns the table shows, in order, skipping any the frame lacks.
+DISPLAY_COLUMNS = ["objectId", "candidate.ra", "candidate.dec"]
+
+
+def load_bot_token(path: Path) -> str:
+    """Read the Slack bot token from a TOML credentials file.
+
+    Parameters
+    ----------
+    path : Path
+        A TOML file holding ``bot_token = "xoxb-..."``. ``~`` is expanded, so
+        the config can point into a home directory on any machine.
+
+    Returns
+    -------
+    str
+        The token.
+
+    Raises
+    ------
+    ValueError
+        If the file is missing, is not valid TOML, or has no ``bot_token``.
+    """
+    path = path.expanduser()
+    try:
+        with path.open("rb") as handle:
+            credentials = tomllib.load(handle)
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"Slack credentials file not found: {path}. Create it with one line, "
+            'bot_token = "xoxb-...", or point [slack].credentials elsewhere.'
+        ) from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Slack credentials file {path} is not valid TOML: {exc}") from exc
+
+    token = credentials.get("bot_token")
+    if not token or not isinstance(token, str):
+        raise ValueError(f'Slack credentials file {path} must set bot_token = "xoxb-...".')
+    return token
+
+
+def _format_cell(value: object) -> str:
+    """Render one table cell, keeping coordinates readable but compact."""
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
+
+
+def _match_columns(frame: npd.NestedFrame) -> list[str]:
+    """The nested columns a crossmatch left, one per catalog.
+
+    Recognized by the ``_dist_arcsec`` field ``crossmatch_nested`` adds, which
+    keeps the alerts' own nested columns (BOOM's ``lspsc``) out of the table.
+    """
+    return [
+        column
+        for column, dtype in frame.dtypes.items()
+        if isinstance(dtype, npd.NestedDtype) and "_dist_arcsec" in frame[column].nest.columns
+    ]
+
+
+def format_message(result: StageResult, max_rows: int) -> str:
+    """Render a stage's non-empty frame as one Slack message.
+
+    Parameters
+    ----------
+    result : StageResult
+        The result to publish. Its ``frame`` must have at least one row; the
+        summary line also uses its ``stamp``, ``summary`` counts, and
+        ``output_path`` when they are set.
+    max_rows : int
+        How many rows the table lists before cutting off with "... and N more".
+
+    Returns
+    -------
+    str
+        The message, in Slack's mrkdwn: a bold header, the table in a code
+        block, and where the full results were written.
+    """
+    frame = result.frame
+    n_rows = len(frame)
+
+    header = f"*DESI Alert Augmentation Pipeline run {result.stamp}*"
+    n_alerts = result.summary.get("n_alerts")
+    matched = f"{n_rows} of {n_alerts} alerts matched" if n_alerts is not None else f"{n_rows} alert(s)"
+    lines = [header, f"{matched}:"]
+
+    shown = frame.head(max_rows)
+    by_column = {
+        column: [_format_cell(value) for value in shown[column]]
+        for column in DISPLAY_COLUMNS
+        if column in frame.columns
+    }
+    # Each catalog's column shows how many of its sources matched the alert.
+    by_column |= {
+        column: [str(count) for count in shown[column].array.list_lengths] for column in _match_columns(frame)
+    }
+    cells = [list(by_column)] + [list(row) for row in zip(*by_column.values(), strict=True)]
+    widths = [max(len(line[i]) for line in cells) for i in range(len(cells[0]))]
+    table = ["  ".join(cell.ljust(width) for cell, width in zip(line, widths, strict=True)) for line in cells]
+    lines += ["```", *table, "```"]
+
+    if n_rows > max_rows:
+        lines.append(f"... and {n_rows - max_rows} more.")
+    if result.output_path is not None:
+        lines.append(f"Full results: `{result.output_path}`")
+    return "\n".join(lines)
+
+
+def post_message(token: str, channel: str, text: str) -> None:
+    """Post one message to a channel with the Slack Web API.
+
+    Parameters
+    ----------
+    token : str
+        A bot token, as :func:`load_bot_token` returns.
+    channel : str
+        The channel to post to, such as ``"#desi-alerts"``.
+    text : str
+        The message, in Slack mrkdwn.
+
+    Raises
+    ------
+    RuntimeError
+        If Slack rejects the message, naming its error code -- and, for the
+        two codes that mean the bot cannot see the channel, the fix.
+    """
+    try:
+        WebClient(token=token).chat_postMessage(channel=channel, text=text)
+    except SlackApiError as exc:
+        error = exc.response.get("error", "unknown error")
+        hint = ""
+        if error in ("not_in_channel", "channel_not_found"):
+            hint = f" Make sure the channel exists and the bot has been invited: /invite in {channel}."
+        raise RuntimeError(f"Slack rejected the message: {error}.{hint}") from exc
+
+
+def run_slack_publish(
+    cfg: PipelineConfig,
+    *,
+    dry_run: bool = False,
+    inputs: StageInputs | None = None,
+    stamp: str | None = None,
+) -> StageResult:
+    """Run the stage: render the previous stage's frame and post it to Slack.
+
+    Parameters
+    ----------
+    cfg : PipelineConfig
+        The pipeline configuration. Without a ``[slack]`` section the stage
+        logs that it is skipping and posts nothing.
+    dry_run : bool
+        Build the message and log it instead of posting it. Also the way to
+        preview the formatting without a workspace.
+    inputs : dict of str to StageResult, optional
+        Results of the stages that already ran. The frame to publish comes
+        from :data:`INPUT_STAGE`.
+    stamp : str, optional
+        This run's timestamp. Defaults to now.
+
+    Returns
+    -------
+    StageResult
+        The input frame, passed through unchanged so this stage never reads
+        as the one that ended the run; ``summary["posted"]`` says whether a
+        message went out.
+
+    Raises
+    ------
+    KeyError
+        If :data:`INPUT_STAGE` has not run.
+    ValueError
+        If the credentials file is missing or malformed.
+    RuntimeError
+        If Slack rejects the message.
+    """
+    stamp = stamp or run_stamp()
+    upstream = input_result(inputs, INPUT_STAGE)
+    frame = upstream.frame
+    summary = {"posted": False, "n_rows": 0 if frame is None else len(frame)}
+    result = StageResult(stage=STAGE, frame=frame, stamp=stamp, summary=summary)
+
+    if cfg.slack is None:
+        logger.info("No [slack] section configured; skipping.")
+        return result
+    if frame is None or frame.empty:
+        logger.info("No rows to publish; posting nothing.")
+        return result
+
+    message = format_message(upstream, cfg.slack.max_rows)
+    if dry_run:
+        logger.info("Dry run: not posting to Slack. The message would have been:\n%s", message)
+        return result
+
+    token = load_bot_token(cfg.slack.credentials)
+    post_message(token, cfg.slack.channel, message)
+    summary["posted"] = True
+    logger.info(
+        "Posted %d of %d row(s) to %s.", min(len(frame), cfg.slack.max_rows), len(frame), cfg.slack.channel
+    )
+    return result

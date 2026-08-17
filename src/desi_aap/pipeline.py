@@ -6,14 +6,18 @@ from desi_aap.config import PipelineConfig
 from desi_aap.stages.base import StageInputs, StageResult
 from desi_aap.stages.crossmatch import run_crossmatch
 from desi_aap.stages.query import run_query
+from desi_aap.stages.slack_publish import run_slack_publish
 from desi_aap.utils import run_stamp
 
 logger = logging.getLogger(__name__)
 
 # Every stage the pipeline knows about, in the order they must run.
+# slack_publish announces the run's results, so it stays last; new data
+# stages go before it (and desi_aap.stages.slack_publish.INPUT_STAGE moves).
 STAGE_ORDER = [
     "query",
     "crossmatch",
+    "slack_publish",
 ]
 
 # Stage name to the function that runs it. Each takes the whole config, the
@@ -22,6 +26,7 @@ STAGE_ORDER = [
 STAGE_RUNNERS: dict[str, Callable[..., StageResult]] = {
     "query": run_query,
     "crossmatch": run_crossmatch,
+    "slack_publish": run_slack_publish,
 }
 
 

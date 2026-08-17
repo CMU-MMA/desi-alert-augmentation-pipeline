@@ -9,13 +9,14 @@
 
 ## Pipeline
 
-`desi-aap` runs a sequence of stages, configured by TOML. Two stages exist
+`desi-aap` runs a sequence of stages, configured by TOML. Three stages exist
 today:
 
 | Stage | Does | Writes |
 |---|---|---|
 | `query` | Queries the [BOOM](https://api.kaboom.caltech.edu) broker for alerts in a time window (`desi_aap.boom`) | `query/alerts_<stamp>.parquet` |
 | `crossmatch` | Wraps those alerts in an LSDB catalog and cross-matches them against the DESI spectroscopic catalogs (`desi_aap.stages.crossmatch`), keeping the alerts that matched | `crossmatch/matches_<stamp>.parquet` |
+| `slack_publish` | Posts the matched alerts to a Slack channel (`desi_aap.stages.slack_publish`). Skips itself unless a `[slack]` section is configured — see [Slack publishing](#slack-publishing) | nothing |
 
 ### Install and run
 
@@ -73,6 +74,11 @@ n_neighbors = 1
 [gracedb]
 cache_dir = "gracedb_cache"
 recheck_window = "30d"
+
+[slack]
+credentials = "~/.config/desi_aap/slack.toml"
+channel = "#desi-alerts"
+max_rows = 20
 ```
 
 Everything else is a property of one invocation rather than of the pipeline's
@@ -145,6 +151,39 @@ output_dir = "/ocean/projects/phy250012p/shared/3DTS/output"
 [gracedb]
 cache_dir = "/ocean/projects/phy250012p/shared/3DTS/gracedb_cache"
 ```
+
+### Slack publishing
+
+The `slack_publish` stage posts each run's matched alerts to a channel: a
+summary line, the first `max_rows` alerts with their coordinates and
+per-catalog match counts, and the path to the full parquet output. The
+pipeline stops before this stage when an earlier one produces no rows, so a
+run with nothing to report posts nothing.
+
+The `[slack]` section is optional — without it the stage logs that it is
+skipping, so a fresh clone runs with no Slack setup. To turn it on:
+
+1. Create a Slack app at https://api.slack.com/apps ("From scratch" is fine —
+   the only scope it needs is `chat:write`, under **OAuth & Permissions** >
+   **Bot Token Scopes**).
+2. Install the app to the workspace on the same page and copy the
+   **Bot User OAuth Token** (it starts with `xoxb-`).
+3. Put the token in a TOML file *outside the repository*, and make it
+   readable only by you:
+
+   ```bash
+   mkdir -p ~/.config/desi_aap
+   echo 'bot_token = "xoxb-your-token-here"' > ~/.config/desi_aap/slack.toml
+   chmod 600 ~/.config/desi_aap/slack.toml
+   ```
+
+4. Invite the bot to the target channel (`/invite @<bot name>` in the
+   channel) and fill in the `[slack]` section: `credentials` is the path from
+   step 3, `channel` is where it posts, and `max_rows` is how many alerts the
+   message lists before cutting off with "... and N more".
+
+`--dry-run` builds the message and logs it instead of posting, which is the
+way to preview the formatting before pointing it at a real channel.
 
 ## GraceDB
 
