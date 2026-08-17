@@ -73,25 +73,29 @@ def test_run_posts_the_matches(slack_config, match_inputs, posted):
     assert call["token"] == "xoxb-test-token"
     assert call["channel"] == "#desi-alerts"
     assert STAMP in call["text"]
+    assert call["blocks"][1]["type"] == "table"
 
 
 def test_the_message_lists_rows_and_cuts_off(matches):
     message = format_message(matches, max_rows=5)
 
-    assert "8 of 327 alerts matched" in message
-    # One line per shown row plus the header row inside the code block.
-    block = message.split("```")[1].strip().splitlines()
-    assert len(block) == 6
-    assert block[0].split() == ["objectId", "candidate.ra", "candidate.dec", "desi_dr1"]
-    assert "... and 3 more." in message
+    section, table = message["blocks"][:2]
+    assert "8 candidates found. Showing the first 5:" in section["text"]["text"]
+    # One row per shown alert, plus the header row.
+    rows = table["rows"]
+    assert len(rows) == 6
+    assert [cell["text"] for cell in rows[0]] == ["objectId", "candidate.ra", "candidate.dec", "desi_dr1"]
+    # Identifiers stay raw_text so Slack cannot reformat them; measures are numbers.
+    assert [cell["type"] for cell in rows[1]] == ["raw_text", "raw_number", "raw_number", "raw_number"]
 
 
 def test_a_short_message_has_no_cutoff_line(matches):
     message = format_message(matches, max_rows=20)
 
-    assert "more." not in message
-    block = message.split("```")[1].strip().splitlines()
-    assert len(block) == 9
+    section, table = message["blocks"][:2]
+    assert "8 candidates found:" in section["text"]["text"]
+    assert "Showing the first" not in section["text"]["text"]
+    assert len(table["rows"]) == 9
 
 
 def test_the_message_names_the_output_file(matches, tmp_path):
@@ -104,9 +108,12 @@ def test_the_message_names_the_output_file(matches, tmp_path):
         summary=matches.summary,
     )
 
-    assert f"Full results: `{written}`" in format_message(with_path, max_rows=5)
+    context = format_message(with_path, max_rows=5)["blocks"][-1]
+    assert context["type"] == "context"
+    assert f"Full results: `{written}`" in context["elements"][0]["text"]
     # The dry-run result wrote nothing, so there is no path to point at.
-    assert "Full results" not in format_message(matches, max_rows=5)
+    blocks = format_message(matches, max_rows=5)["blocks"]
+    assert all(block["type"] != "context" for block in blocks)
 
 
 def test_no_slack_section_skips(pipeline_config, match_inputs, posted, caplog):
@@ -126,7 +133,7 @@ def test_dry_run_logs_the_message_without_posting(slack_config, match_inputs, po
 
     assert posted == []
     assert result.summary["posted"] is False
-    assert "8 of 327 alerts matched" in caplog.text
+    assert "8 candidates found" in caplog.text
 
 
 def test_an_empty_upstream_posts_nothing(slack_config, posted):
@@ -191,4 +198,4 @@ def test_the_stage_runs_last(slack_config, stub_boom, posted):
 
     assert list(results)[-1] == STAGE
     (call,) = posted
-    assert "8 of 327 alerts matched" in call["text"]
+    assert "8 candidates found" in call["text"]

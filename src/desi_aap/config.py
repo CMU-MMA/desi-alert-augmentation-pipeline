@@ -140,8 +140,9 @@ class SlackConfig(_Section):
     # control while config.toml stays committed.
     credentials: Path
     channel: str
-    # How many matched alerts the message lists before cutting off with "... and N more".
-    max_rows: int = Field(default=20, ge=1)
+    # How many candidates the message lists before cutting off. At most 99:
+    # Slack's table block holds 100 rows, and the header takes one.
+    max_rows: int = Field(default=20, ge=1, le=99)
 
 
 class QueryConfig(_Section):

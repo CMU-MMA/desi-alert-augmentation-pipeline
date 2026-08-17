@@ -57,7 +57,7 @@ n_neighbors = 1
 # # see the README for how to register the app and get a token.
 # credentials = "~/.config/desi_aap/slack.toml"
 # channel = "#desi-alerts"
-# # Alerts listed in the message before it cuts off with "... and N more".
+# # Candidates listed in the message before it cuts off.
 # max_rows = 20
 
 # ===========================================================================

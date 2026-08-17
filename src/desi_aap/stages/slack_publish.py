@@ -1,9 +1,10 @@
 """Post each run's matched alerts to a Slack channel.
 
 The stage takes the frame the previous stage produced, renders it as a short
-message -- a summary line, the first ``[slack].max_rows`` alerts as a
-fixed-width table, and a pointer to the full parquet output -- and posts it
-with the Slack Web API's ``chat.postMessage``.
+message -- a header naming the run, how many candidates it found, the first
+``[slack].max_rows`` of them as a native Block Kit table, and a pointer to
+the full parquet output -- and posts it with the Slack Web API's
+``chat.postMessage``.
 
 Posting needs a *bot token*: register an app on https://api.slack.com/apps
 with the ``chat:write`` scope, install it to the workspace, and put the
@@ -16,9 +17,11 @@ The pipeline stops before this stage when an earlier one produces no rows, so
 a run with nothing to report posts nothing by design.
 """
 
+import json
 import logging
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import nested_pandas as npd
 from slack_sdk import WebClient
@@ -98,55 +101,71 @@ def _match_columns(frame: npd.NestedFrame) -> list[str]:
     ]
 
 
-def format_message(result: StageResult, max_rows: int) -> str:
+def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
     """Render a stage's non-empty frame as one Slack message.
 
     Parameters
     ----------
     result : StageResult
         The result to publish. Its ``frame`` must have at least one row; the
-        summary line also uses its ``stamp``, ``summary`` counts, and
-        ``output_path`` when they are set.
+        message also names its ``stamp`` and, when set, its ``output_path``.
     max_rows : int
-        How many rows the table lists before cutting off with "... and N more".
+        How many rows the table lists before cutting off.
 
     Returns
     -------
-    str
-        The message, in Slack's mrkdwn: a bold header, the table in a code
-        block, and where the full results were written.
+    dict
+        Keyword arguments for ``chat.postMessage``: a plain ``text`` fallback
+        for notifications, and ``blocks`` holding a header section naming the
+        run and how many candidates it found, a native table block, and,
+        when the results were written, where.
     """
     frame = result.frame
     n_rows = len(frame)
 
-    header = f"*DESI Alert Augmentation Pipeline run {result.stamp}*"
-    n_alerts = result.summary.get("n_alerts")
-    matched = f"{n_rows} of {n_alerts} alerts matched" if n_alerts is not None else f"{n_rows} alert(s)"
-    lines = [header, f"{matched}:"]
+    title = f"DESI Alert Augmentation Pipeline run {result.stamp}"
+    found = f"{n_rows} candidate{'' if n_rows == 1 else 's'} found"
+    cutoff = f". Showing the first {max_rows}:" if n_rows > max_rows else ":"
 
+    # Each column is (name, its cells as strings, whether it holds numbers).
+    # Only floats count as numeric: the integer columns are identifiers, which
+    # raw_number cells could reformat.
     shown = frame.head(max_rows)
-    by_column = {
-        column: [_format_cell(value) for value in shown[column]]
-        for column in DISPLAY_COLUMNS
-        if column in frame.columns
-    }
+    columns = [
+        (name, [_format_cell(value) for value in shown[name]], shown[name].dtype.kind == "f")
+        for name in DISPLAY_COLUMNS
+        if name in frame.columns
+    ]
     # Each catalog's column shows how many of its sources matched the alert.
-    by_column |= {
-        column: [str(count) for count in shown[column].array.list_lengths] for column in _match_columns(frame)
-    }
-    cells = [list(by_column)] + [list(row) for row in zip(*by_column.values(), strict=True)]
-    widths = [max(len(line[i]) for line in cells) for i in range(len(cells[0]))]
-    table = ["  ".join(cell.ljust(width) for cell, width in zip(line, widths, strict=True)) for line in cells]
-    lines += ["```", *table, "```"]
+    columns += [
+        (name, [str(count) for count in shown[name].array.list_lengths], True)
+        for name in _match_columns(frame)
+    ]
 
-    if n_rows > max_rows:
-        lines.append(f"... and {n_rows - max_rows} more.")
+    header_row = [{"type": "raw_text", "text": name} for name, _, _ in columns]
+    value_rows = [
+        [{"type": "raw_number" if numeric else "raw_text", "text": cells[i]} for _, cells, numeric in columns]
+        for i in range(len(shown))
+    ]
+    blocks: list[dict[str, Any]] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*\n{found}{cutoff}"}},
+        {
+            "type": "table",
+            "column_settings": [{"align": "right" if numeric else "left"} for _, _, numeric in columns],
+            "rows": [header_row, *value_rows],
+        },
+    ]
     if result.output_path is not None:
-        lines.append(f"Full results: `{result.output_path}`")
-    return "\n".join(lines)
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"Full results: `{result.output_path}`"}],
+            }
+        )
+    return {"text": f"{title}: {found}.", "blocks": blocks}
 
 
-def post_message(token: str, channel: str, text: str) -> None:
+def post_message(token: str, channel: str, text: str, blocks: list[dict[str, Any]] | None = None) -> None:
     """Post one message to a channel with the Slack Web API.
 
     Parameters
@@ -156,7 +175,10 @@ def post_message(token: str, channel: str, text: str) -> None:
     channel : str
         The channel to post to, such as ``"#desi-alerts"``.
     text : str
-        The message, in Slack mrkdwn.
+        Plain text. With ``blocks`` it only feeds notifications and clients
+        that cannot render them; alone it is the whole message.
+    blocks : list of dict, optional
+        Block Kit blocks, as :func:`format_message` builds.
 
     Raises
     ------
@@ -165,7 +187,7 @@ def post_message(token: str, channel: str, text: str) -> None:
         two codes that mean the bot cannot see the channel, the fix.
     """
     try:
-        WebClient(token=token).chat_postMessage(channel=channel, text=text)
+        WebClient(token=token).chat_postMessage(channel=channel, text=text, blocks=blocks)
     except SlackApiError as exc:
         error = exc.response.get("error", "unknown error")
         hint = ""
@@ -228,11 +250,15 @@ def run_slack_publish(
 
     message = format_message(upstream, cfg.slack.max_rows)
     if dry_run:
-        logger.info("Dry run: not posting to Slack. The message would have been:\n%s", message)
+        logger.info(
+            "Dry run: not posting to Slack. %s Blocks payload:\n%s",
+            message["text"],
+            json.dumps(message["blocks"], indent=2),
+        )
         return result
 
     token = load_bot_token(cfg.slack.credentials)
-    post_message(token, cfg.slack.channel, message)
+    post_message(token, cfg.slack.channel, message["text"], message["blocks"])
     summary["posted"] = True
     logger.info(
         "Posted %d of %d row(s) to %s.", min(len(frame), cfg.slack.max_rows), len(frame), cfg.slack.channel

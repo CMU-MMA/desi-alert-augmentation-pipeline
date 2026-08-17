@@ -154,9 +154,10 @@ cache_dir = "/ocean/projects/phy250012p/shared/3DTS/gracedb_cache"
 
 ### Slack publishing
 
-The `slack_publish` stage posts each run's matched alerts to a channel: a
-summary line, the first `max_rows` alerts with their coordinates and
-per-catalog match counts, and the path to the full parquet output. The
+The `slack_publish` stage posts each run's candidates to a channel: a header
+naming the run, how many candidates it found, the first `max_rows` of them
+with their coordinates and per-catalog match counts, and the path to the
+full parquet output. The
 pipeline stops before this stage when an earlier one produces no rows, so a
 run with nothing to report posts nothing.
 
@@ -179,8 +180,8 @@ skipping, so a fresh clone runs with no Slack setup. To turn it on:
 
 4. Invite the bot to the target channel (`/invite @<bot name>` in the
    channel) and fill in the `[slack]` section: `credentials` is the path from
-   step 3, `channel` is where it posts, and `max_rows` is how many alerts the
-   message lists before cutting off with "... and N more".
+   step 3, `channel` is where it posts, and `max_rows` is how many candidates
+   the message lists before cutting off.
 
 `--dry-run` builds the message and logs it instead of posting, which is the
 way to preview the formatting before pointing it at a real channel.
