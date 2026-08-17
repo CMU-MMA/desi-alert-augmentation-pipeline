@@ -6,10 +6,11 @@ import pytest
 import requests
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from desi_aap import gcn_notices, gcn_skymaps
 from gcn_examples import build_moc_fits_bytes, icecube_gold_bronze, swift_bat_guano
 from ligo.skymap.io import read_sky_map
 from ligo.skymap.postprocess import crossmatch
+
+from desi_aap import gcn_notices, gcn_skymaps
 
 # A half-degree circle at 90% containment, the shape Swift GUANO and IceCube both quote.
 TEST_RA = 336.26

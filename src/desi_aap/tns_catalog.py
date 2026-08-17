@@ -6,6 +6,7 @@ credentials are read from the environment; see tns_credentials.
 """
 
 import os
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
@@ -14,25 +15,6 @@ from astropy import units as u
 
 from desi_aap.cosmology import COSMOLOGIES
 
-# Names of the environment variables holding the TNS bot credentials. They are read at call
-# time rather than at import, so the package imports fine without them and only
-# download_tns_table requires them to be set. In CI they come from repository secrets of the
-# same names; locally, export them in the shell or notebook kernel first.
-TNS_API_KEY_ENV = "TNS_API_KEY"
-TNS_BOT_ID_ENV = "TNS_BOT_ID"
-TNS_BOT_NAME_ENV = "TNS_BOT_NAME"
-
-# TNS settings copied from the existing workflow.
-CATALOG_URL = "https://www.wis-tns.org/system/files/tns_public_objects/tns_public_objects.csv.zip"
-TNS_CSV_SKIPROWS = 1
-STRIPPED_ENVELOPE_TYPE_REGEX = (
-    "Ib|Ic|IIb"  # TODO: Claude notes that this also matches SLSN-1c, which may not be desired. Check.
-)
-MAX_STRIPPED_ENVELOPE_DISTANCE_MPC = 500
-# Smallest redshift treated as a real measurement. Roughly 0.9 Mpc under either
-# cosmology, so it excludes the Local Group along with the z <= 0 placeholders.
-MIN_REDSHIFT = 0.0002
-
 
 def tns_credentials():
     """Read the TNS bot credentials from the environment.
@@ -40,6 +22,11 @@ def tns_credentials():
     Kept separate from download_tns_table so the "are we configured?" check can be made
     without issuing a request, and so a misconfiguration reports which variable is at fault
     rather than surfacing as an opaque HTTP error from TNS.
+
+    The three variable names are fixed rather than configurable: they are read at call time
+    rather than at import, so the package imports fine without them and only
+    download_tns_table requires them to be set. In CI they come from repository secrets of
+    the same names; locally, export them in the shell or notebook kernel first.
 
     Returns
     -------
@@ -57,7 +44,11 @@ def tns_credentials():
         If any of the three variables is unset or empty, or if $TNS_BOT_ID is not an
         integer. The latter most often means two of the values were swapped.
     """
-    names = (TNS_API_KEY_ENV, TNS_BOT_ID_ENV, TNS_BOT_NAME_ENV)
+    api_key_env = "TNS_API_KEY"
+    bot_id_env = "TNS_BOT_ID"
+    bot_name_env = "TNS_BOT_NAME"
+
+    names = (api_key_env, bot_id_env, bot_name_env)
     values = {name: (os.environ.get(name) or "").strip() for name in names}
 
     missing = [name for name in names if not values[name]]
@@ -69,32 +60,36 @@ def tns_credentials():
             "secrets of the same names."
         )
 
-    bot_id = values[TNS_BOT_ID_ENV]
+    bot_id = values[bot_id_env]
     try:
         int(bot_id)
     except ValueError:
         raise RuntimeError(
-            f"{TNS_BOT_ID_ENV} must be an integer TNS bot id, got {bot_id!r}. Check that "
-            f"{TNS_BOT_ID_ENV} and {TNS_BOT_NAME_ENV} are not swapped."
+            f"{bot_id_env} must be an integer TNS bot id, got {bot_id!r}. Check that "
+            f"{bot_id_env} and {bot_name_env} are not swapped."
         ) from None
 
-    return values[TNS_API_KEY_ENV], bot_id, values[TNS_BOT_NAME_ENV]
+    return values[api_key_env], bot_id, values[bot_name_env]
 
 
 def download_tns_table():
-    """Download the zipped TNS public objects CSV and return its raw bytes.
+    """Download the TNS public objects catalog and return it as a dataframe.
 
     TNS requires a registered bot: the request carries a tns_marker user-agent naming the
     bot id and name, and posts the API key. All three come from the environment via
     tns_credentials. The catalog is regenerated daily after UT midnight, so repeat calls
     within a day fetch the same snapshot.
 
+    The payload arrives as a zipped CSV whose first line is the timestamp at which TNS
+    generated the file rather than the column header, so it is skipped. That detail is
+    handled here, next to the request that knows the format, rather than being left to
+    callers.
+
     Returns
     -------
-    bytes
-        The raw zip payload, ready for pandas.read_csv with compression="zip" and
-        skiprows=TNS_CSV_SKIPROWS. That first line is the timestamp at which TNS generated
-        the file, not the column header.
+    pandas.DataFrame
+        The catalog as published, every column still a string unless pandas inferred
+        otherwise, ready for clean_tns_catalog.
 
     Raises
     ------
@@ -103,32 +98,55 @@ def download_tns_table():
     requests.HTTPError
         If TNS rejects the request, for instance on an invalid API key.
     """
+    catalog_url = "https://www.wis-tns.org/system/files/tns_public_objects/tns_public_objects.csv.zip"
+    # The generation timestamp TNS writes above the header row.
+    tns_csv_skiprows = 1
+
     api_key, bot_id, bot_name = tns_credentials()
     user_agent = f'tns_marker{{"tns_id":"{bot_id}","type":"bot","name":"{bot_name}"}}'
     with requests.post(
-        CATALOG_URL,
+        catalog_url,
         headers={"user-agent": user_agent},
         data={"api_key": (None, api_key)},
     ) as response:
         response.raise_for_status()
-        return response.content
+        payload = response.content
+
+    return pd.read_csv(BytesIO(payload), skiprows=tns_csv_skiprows, compression="zip", low_memory=False)
 
 
-def clean_tns_catalog(df):
+def clean_tns_catalog(
+    df,
+    *,
+    # TODO: Claude notes that this also matches SLSN-1c, which may not be desired. Check.
+    stripped_env_type_regex="Ib|Ic|IIb",
+    max_stripped_env_distance_mpc=500,
+    min_redshift=0.0002,
+):
     """Filter a raw TNS catalog dataframe down to nearby stripped-envelope supernovae.
 
-    Keeps objects whose TNS type matches STRIPPED_ENVELOPE_TYPE_REGEX and whose redshift is
-    at least MIN_REDSHIFT, adds a luminosity distance for every cosmology in COSMOLOGIES,
-    and keeps those closer than MAX_STRIPPED_ENVELOPE_DISTANCE_MPC under at least one of
-    them.
+    Keeps objects whose TNS type matches stripped_env_type_regex and whose redshift is at
+    least min_redshift, adds a luminosity distance for every cosmology in COSMOLOGIES, and
+    keeps those closer than max_stripped_env_distance_mpc under at least one of them.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        Raw TNS public objects table. Must carry the name, ra, declination, redshift, type,
-        discoverydate, reporting_group and internal_names columns; every other column is
-        dropped. ra, declination, redshift and discoverydate are parsed leniently, and a row
-        is dropped if any of those four fails to parse.
+        Raw TNS public objects table, as returned by download_tns_table. Must carry the
+        name, ra, declination, redshift, type, discoverydate, reporting_group and
+        internal_names columns; every other column is dropped. ra, declination, redshift and
+        discoverydate are parsed leniently, and a row is dropped if any of those four fails
+        to parse.
+    stripped_env_type_regex : str, optional
+        Regex matched against the TNS type column to select stripped-envelope supernovae.
+        Defaults to "Ib|Ic|IIb".
+    max_stripped_env_distance_mpc : float, optional
+        Luminosity-distance cut in Mpc, exclusive. An object is kept if it falls inside this
+        under at least one cosmology, not all of them. Defaults to 500.
+    min_redshift : float, optional
+        Smallest redshift treated as a real measurement, inclusive. Roughly 0.9 Mpc under
+        either cosmology, so it excludes the Local Group along with the z <= 0 placeholders;
+        see the Notes below for why the floor exists at all. Defaults to 0.0002.
 
     Returns
     -------
@@ -139,7 +157,7 @@ def clean_tns_catalog(df):
 
     Notes
     -----
-    Redshift is floored at MIN_REDSHIFT rather than taken as published, because neither of
+    Redshift is floored at min_redshift rather than taken as published, because neither of
     the two ways a catalog redshift can be non-positive yields a meaningful luminosity
     distance. A z of exactly 0 places an extragalactic transient at zero distance, which is
     not a measurement however it arose. A negative z is a genuine blueshift, which happens
@@ -186,7 +204,7 @@ def clean_tns_catalog(df):
         "internal_names",
     ]
     df = df[keep_cols].copy()
-    df = df[df["type"].str.contains(STRIPPED_ENVELOPE_TYPE_REGEX, na=False, regex=True)].copy()
+    df = df[df["type"].str.contains(stripped_env_type_regex, na=False, regex=True)].copy()
     df["discoverydate"] = pd.to_datetime(df["discoverydate"], errors="coerce", utc=True)
     df["redshift"] = pd.to_numeric(df["redshift"], errors="coerce")
     df["ra"] = pd.to_numeric(df["ra"], errors="coerce")
@@ -194,7 +212,7 @@ def clean_tns_catalog(df):
     # Ahead of the cosmology loop rather than alongside the other cuts below, so that the
     # redshifts with no usable luminosity distance never reach astropy. NaN fails this
     # comparison too, so an unparseable redshift is dropped here.
-    df = df[df["redshift"] >= MIN_REDSHIFT]
+    df = df[df["redshift"] >= min_redshift]
 
     for label, cosmo in COSMOLOGIES.items():
         dist_col = f"dist_mpc_{label}"
@@ -212,5 +230,5 @@ def clean_tns_catalog(df):
     df = df.dropna(subset=required)
     near = np.zeros(len(df), dtype=bool)
     for label in COSMOLOGIES:
-        near |= df[f"dist_mpc_{label}"] < MAX_STRIPPED_ENVELOPE_DISTANCE_MPC
+        near |= df[f"dist_mpc_{label}"] < max_stripped_env_distance_mpc
     return df[near].reset_index(drop=True)

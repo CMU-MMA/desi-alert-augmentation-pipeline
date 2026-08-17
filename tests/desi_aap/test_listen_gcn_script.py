@@ -9,6 +9,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+
 from desi_aap import gcn_listener, gcn_notices, gcn_store
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "listen_gcn.py"

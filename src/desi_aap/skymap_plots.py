@@ -15,7 +15,7 @@ from ligo.skymap.postprocess import contour, find_greedy_credible_levels
 from ligo.skymap.postprocess.cosmology import dVC_dVL_for_DL
 from matplotlib.lines import Line2D
 
-from desi_aap.gracedb_tools import CREDIBLE_LEVEL, USE_COMOVING_VOLUME_RANKING, safe_file_part
+from desi_aap.gracedb_tools import USE_COMOVING_VOLUME_RANKING, safe_file_part
 
 # Local output directory.
 PLOT_DIR = Path("gracedb_sesn_3d_plots")
@@ -29,17 +29,10 @@ PLOT_PROBABILITY_MIN = 0.0
 PLOT_BBOX_INCHES = "tight"
 PLOT_PERCENT_SCALE = 100
 
-# Projected 3D contour grid settings.
-DISTANCE_GRID_SIZE = 1000
-DISTANCE_GRID_DISTMEAN_MULTIPLIER = 6.0
-DISTANCE_GRID_SN_DISTANCE_MULTIPLIER = 1.05
-DISTANCE_SHELL_VARIANCE_DENOMINATOR = 12.0
-GAUSSIAN_EXPONENT_FACTOR = -0.5
-
 # HEALPix order for the projected 3D contour, deliberately coarser than PLOT_HEALPIX_ORDER.
-# raster_3d_density_slice allocates several (npix, DISTANCE_GRID_SIZE) float64 grids, so cost
-# rises 4x per order: order 6 needs a few GB, order 8 would need roughly 31 GB. Contours are
-# smooth enough that the coarser grid costs little in the drawn result.
+# raster_3d_density_slice allocates several (npix, grid_size) float64 grids, so cost rises 4x
+# per order: order 6 needs a few GB, order 8 would need roughly 31 GB. Contours are smooth
+# enough that the coarser grid costs little in the drawn result.
 CONTOUR_HEALPIX_ORDER = 6
 
 # Contour and marker styling.
@@ -111,7 +104,16 @@ def raster_prob_from_moc(skymap, order=PLOT_HEALPIX_ORDER):
     return prob
 
 
-def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=PLOT_HEALPIX_ORDER):
+def raster_3d_density_slice(
+    skymap,
+    dl_mpc,
+    contour_level,
+    *,
+    order=PLOT_HEALPIX_ORDER,
+    grid_size=1000,
+    distmean_multiplier=6.0,
+    sn_distance_multiplier=1.05,
+):
     """Return an approximate projected 3D contour map at one distance.
 
 
@@ -122,10 +124,21 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=
     dl_mpc : float
         Luminosity distance in Mpc to evaluate at, normally the SN's distance under the
         cosmology being plotted.
-    contour_level : float, optional
-        Credible level the threshold should enclose. Defaults to CREDIBLE_LEVEL.
+    contour_level : float
+        Credible level the threshold should enclose.
     order : int, optional
         HEALPix order to rasterize to. Defaults to PLOT_HEALPIX_ORDER.
+    grid_size : int, optional
+        Number of radial steps the distance posterior is integrated over. Cost and memory
+        scale with it linearly, as several (npix, grid_size) float64 grids are allocated,
+        and so does the resolution of the credible-density threshold. Must be at least 2,
+        since the grid spans np.arange(1, grid_size). Defaults to 1000.
+    distmean_multiplier : float, optional
+        How many times the posterior's mean distance the radial grid extends to, so that the
+        integral captures essentially all the probability. Defaults to 6.0.
+    sn_distance_multiplier : float, optional
+        Floor on the grid's extent as a multiple of dl_mpc, so an SN beyond
+        distmean_multiplier * distmean still falls inside the grid. Defaults to 1.05.
 
     Returns
     -------
@@ -137,7 +150,20 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=
     density_threshold : float
         Density bounding the contour_level region, or NaN whenever density_at_distance is
         None.
+
+    Raises
+    ------
+    ValueError
+        If grid_size is below 2. Raised rather than reported as an unavailable slice,
+        because the None return above is reserved for skymaps that cannot support one,
+        whereas too small a grid is a mistake in the call.
     """
+    # np.arange(1, 1) is empty, and an empty radial grid reaches dVC_dVL_for_DL, whose
+    # np.vectorize rejects size-0 input with a message about otypes that says nothing about
+    # the real cause. clean_tns_catalog documents the same numpy behaviour.
+    if grid_size < 2:
+        raise ValueError(f"grid_size must be at least 2 to give a radial grid, got {grid_size}")
+
     raster = moc.rasterize(skymap, order=order)
     nside = hp.npix2nside(len(raster))
     dA = np.full(len(raster), hp.nside2pixarea(nside))
@@ -163,18 +189,20 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=
     dP[valid] = dP_dA[valid] * dA[valid]
     distmean, _ = distance.parameters_to_marginal_moments(dP[valid], mu[valid], sigma[valid])
 
-    max_r = max(
-        DISTANCE_GRID_DISTMEAN_MULTIPLIER * distmean,
-        DISTANCE_GRID_SN_DISTANCE_MULTIPLIER * dl_mpc,
-    )
+    max_r = max(distmean_multiplier * distmean, sn_distance_multiplier * dl_mpc)
     if not np.isfinite(max_r) or max_r <= 0:
         return None, np.nan
-    d_r = max_r / DISTANCE_GRID_SIZE
-    r = d_r * np.arange(1, DISTANCE_GRID_SIZE)
+    d_r = max_r / grid_size
+    r = d_r * np.arange(1, grid_size)
 
-    dV = (np.square(r) + np.square(d_r) / DISTANCE_SHELL_VARIANCE_DENOMINATOR) * d_r * dA.reshape(-1, 1)
+    # Variance of a uniform distribution across the shell's width, which is what the second
+    # term of the exact shell integral is: integrating r^2 dr from r - d_r/2 to r + d_r/2
+    # gives d_r * (r^2 + d_r^2 / 12), so the 12 follows from the geometry rather than tuning.
+    shell_width_variance = np.square(d_r) / 12.0
+    dV = (np.square(r) + shell_width_variance) * d_r * dA.reshape(-1, 1)
+    # exp(-z^2 / 2), the Gaussian each pixel's distance posterior is modelled as.
     radial_density = np.exp(
-        GAUSSIAN_EXPONENT_FACTOR * np.square((r.reshape(1, -1) - mu.reshape(-1, 1)) / sigma.reshape(-1, 1))
+        -0.5 * np.square((r.reshape(1, -1) - mu.reshape(-1, 1)) / sigma.reshape(-1, 1))
     ) * (dP_dA * norm / (sigma * np.sqrt(2 * np.pi))).reshape(-1, 1)
     dP_grid = radial_density * dV
     dP_grid[~np.isfinite(dP_grid)] = 0
@@ -196,7 +224,8 @@ def raster_3d_density_slice(skymap, dl_mpc, contour_level=CREDIBLE_LEVEL, order=
     threshold_idx = min(np.searchsorted(cumulative_prob, target_prob), len(ranked_density) - 1)
     density_threshold = ranked_density[threshold_idx]
 
-    density_at_distance = np.exp(GAUSSIAN_EXPONENT_FACTOR * np.square((dl_mpc - mu) / sigma)) * (
+    # The same Gaussian as above, evaluated at the SN's distance rather than across the grid.
+    density_at_distance = np.exp(-0.5 * np.square((dl_mpc - mu) / sigma)) * (
         dP_dA * norm / (sigma * np.sqrt(2 * np.pi))
     )
     if USE_COMOVING_VOLUME_RANKING:
@@ -220,8 +249,8 @@ def draw_contours(prob, skymap, row, order=CONTOUR_HEALPIX_ORDER):
         The multiorder skymap those probabilities came from, needed for its distance
         columns.
     row : pandas.Series
-        A row of the run_3d_spatial_crossmatch output. Only sn_dist_mpc is read, giving the
-        distance the 3D contour is projected at.
+        A row of the run_3d_spatial_crossmatch output. sn_dist_mpc gives the distance the
+        3D contour is projected at, and credible_level the level both contours enclose.
     order : int, optional
         HEALPix order for the 3D slice. Defaults to CONTOUR_HEALPIX_ORDER, which is coarser
         than the map itself because the slice grid's cost rises 4x per order.
@@ -232,8 +261,9 @@ def draw_contours(prob, skymap, row, order=CONTOUR_HEALPIX_ORDER):
         True if at least one 3D contour polygon was drawn, False if the 3D slice was
         unavailable and only the 2D contour was drawn.
     """
+    credible_level = row["credible_level"]
     credible_2d = find_greedy_credible_levels(prob)
-    for polygon in contour(credible_2d, [CREDIBLE_LEVEL], nest=True, degrees=True)[0]:
+    for polygon in contour(credible_2d, [credible_level], nest=True, degrees=True)[0]:
         polygon = np.asarray(polygon)
         if len(polygon):
             hp.projplot(
@@ -246,7 +276,7 @@ def draw_contours(prob, skymap, row, order=CONTOUR_HEALPIX_ORDER):
             )
 
     density_slice, density_threshold = raster_3d_density_slice(
-        skymap, row["sn_dist_mpc"], CREDIBLE_LEVEL, order=order
+        skymap, row["sn_dist_mpc"], credible_level, order=order
     )
     if density_slice is None or not np.isfinite(density_threshold) or density_threshold <= 0:
         return False
@@ -281,8 +311,10 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False, output_form
         filtered on spatial_status and inside_3d_credible_level. Read for superevent_id,
         name, type, cosmology, ra, declination, sn_dist_mpc, days_from_gw,
         searched_prob_2d, searched_prob_3d_density_rank, searched_prob_dist,
-        credible_area_deg2 and credible_volume_mpc3, plus gw_far_per_year, gw_p_bns and
-        gw_p_nsbh, which fall back to NaN in the annotation when absent.
+        credible_area_deg2, credible_volume_mpc3 and credible_level, plus gw_far_per_year,
+        gw_p_bns and gw_p_nsbh, which fall back to NaN in the annotation when absent.
+        credible_level sets both the contours drawn and the percentage they are labelled
+        with.
     gw_events : pandas.DataFrame
         Superevent table from fetch_gracedb_superevents, used to look up the event's
         skymap_path by superevent_id.
@@ -344,7 +376,7 @@ def plot_3d_coincidence(row, gw_events, outdir=PLOT_DIR, show=False, output_form
         zorder=SN_MARKER_ZORDER,
     )
 
-    percent = PLOT_PERCENT_SCALE * CREDIBLE_LEVEL
+    percent = PLOT_PERCENT_SCALE * row["credible_level"]
     three_d_label = (
         f"3D density-rank {percent:.0f}% at {row['sn_dist_mpc']:.0f} Mpc"
         if drew_3d

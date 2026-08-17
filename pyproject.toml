@@ -18,22 +18,31 @@ classifiers = [
 dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=1.24",
-    "pandas>=2.0",
-    "requests>=2.28",
-    "astropy>=5.3",
-    # 1.17.1 rather than 1.16: healpy imported scipy.integrate.trapz until then, and scipy
-    # removed it in 1.14. scipy is only a transitive dependency here, so it resolves to a
-    # current release even in the lowest-versions job, and an older healpy fails on import.
-    "healpy>=1.17.1",
-    "matplotlib>=3.6",
+    "astropy>=8.0",
+    "gcn-kafka>=0.3",  # GCN Kafka client for the live notice listener. It pulls in
+                       # confluent-kafka, which is why desi_aap.gcn_listener imports it
+                       # lazily: parsing, synthesizing and storing notices all work
+                       # without a Kafka client present.
+    "healpy>=1.17.1",  # 1.17.1 rather than 1.16: healpy imported scipy.integrate.trapz
+                       # until then, and scipy removed it in 1.14. scipy is only a transitive
+                       # dependency here, so it resolves to a current release even in the
+                       # lowest-versions job, and an older healpy fails on import.
     "ligo-gracedb>=2.10",
-    "ligo.skymap>=1.0.7",
-    # GCN Kafka client for the live notice listener. It pulls in confluent-kafka, which is
-    # why desi_aap.gcn_listener imports it lazily: parsing, synthesizing and storing notices
-    # all work without a Kafka client present.
-    "gcn-kafka>=0.3",
+    "ligo.skymap>=2.4.0",  # 2.4.0 drops python-ligo-lw/ligo-segments for igwn-segments;
+                       # ligo-segments has no macOS arm64 wheel and its C extension
+                       # fails to compile on Python 3.12
+    "matplotlib>=3.6",
+    "nested-pandas>=0.6",  # NestedFrame for list-of-struct alert fields; brings in pyarrow
+    "numpy>=1.24",
+    "lsdb>=0.10.4", # Crossmatching
+    "pyarrow>=16",  # Parquet reading and writing
+    "pydantic>=2.0", # Validates the TOML configuration file
+    "typer>=0.16",  # Command-line entry point
+    "requests>=2.28",
 ]
+
+[project.scripts]
+desi-aap = "desi_aap.cli:app"
 
 [project.urls]
 "Source Code" = "https://github.com/CMU-MMA/desi_aap"
@@ -55,6 +64,9 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+desi_aap = ["*.json"]
+
 [tool.setuptools_scm]
 write_to = "src/desi_aap/_version.py"
 
@@ -68,6 +80,10 @@ addopts = "--doctest-modules --doctest-glob=*.rst"
 
 [tool.ruff]
 line-length = 110
+[tool.ruff.lint.isort]
+# Pin first-party detection so different ruff versions (pinned pre-commit vs
+# local) agree on import grouping.
+known-first-party = ["desi_aap"]
 [tool.ruff.lint]
 select = [
     # pycodestyle
@@ -110,6 +126,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D103"]
+"scripts/*" = ["D101","D102","D103"]
 # raster_3d_density_slice names its intermediates after the quantities they hold, so dP_dA
 # is the probability density per unit area and dV a volume element. Lowercasing them to
 # satisfy pep8-naming would leave dp_da and dv, which no longer read as the maths.
@@ -117,7 +135,6 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
-
 
 [tool.coverage.run]
 omit=["src/desi_aap/_version.py"]

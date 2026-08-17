@@ -3,7 +3,6 @@
 import json
 
 import pytest
-from desi_aap import gcn_notices
 from gcn_examples import (
     BOOM_CROSSMATCH_ID,
     BOOM_TARGET_NAME,
@@ -22,6 +21,8 @@ from gcn_examples import (
     igwn_gwalert,
     swift_bat_guano,
 )
+
+from desi_aap import gcn_notices
 
 
 def test_every_default_topic_has_a_route_and_a_parser():

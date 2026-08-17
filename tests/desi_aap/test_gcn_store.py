@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pytest
-from desi_aap import gcn_notices, gcn_store
 from gcn_examples import (
     BOOM_CROSSMATCH_ID,
     GUANO_TRIGGER_ID,
@@ -15,6 +14,8 @@ from gcn_examples import (
     igwn_gwalert,
     swift_bat_guano,
 )
+
+from desi_aap import gcn_notices, gcn_store
 
 # A fixed arrival time keeps stems and history entries deterministic across runs.
 RECEIVED_TIME = "2026-08-06T12:00:00Z"

@@ -28,7 +28,10 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from desi_aap.gracedb_tools import safe_file_part
+# safe_file_part lives in gracedb_cache rather than gracedb_tools, which only re-exports it.
+# Taking it from its own module keeps this store off the GraceDB REST and ligo.skymap import
+# chain, which it otherwise has no use for.
+from desi_aap.gracedb_cache import safe_file_part
 
 # Root of the store, relative to the working directory unless overridden.
 STORE_ROOT = Path("gcn_localizations")

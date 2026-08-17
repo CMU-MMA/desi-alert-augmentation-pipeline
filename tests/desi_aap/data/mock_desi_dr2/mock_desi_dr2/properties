@@ -1,0 +1,18 @@
+#HATS catalog
+obs_collection=mock_desi_dr2
+dataproduct_type=object
+hats_nrows=408
+hats_col_ra=RA
+hats_col_dec=DEC
+hats_col_healpix=_healpix_29
+hats_col_healpix_order=29
+hats_npix_suffix=.parquet
+hats_skymap_order=8
+hats_max_rows=351
+hats_estsize=5894
+moc_sky_fraction=0.0019531
+hats_order=4
+hats_builder=lsdb v0.9.1.dev75+gf24b3256e.d20260527, hats v0.10.4
+hats_creation_date=2026-08-06T18:15UTC
+hats_release_date=2025-08-22
+hats_version=v1.0

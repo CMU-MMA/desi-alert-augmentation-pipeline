@@ -1,9 +1,12 @@
 import json
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
+from astropy.time import Time
+
 from desi_aap import gracedb_tools
 from desi_aap.cosmology import COSMOLOGIES
 
@@ -11,9 +14,15 @@ from desi_aap.cosmology import COSMOLOGIES
 GW190425_GPS = 1240215503.017147
 GW190425_UTC = pd.Timestamp("2019-04-25 08:18:05.017147", tz="UTC")
 
-# FAR values in Hz that land either side of FAR_THRESHOLD_PER_YEAR = 2.0 per year.
+# FAR values in Hz that land either side of the default far_threshold_per_year of 2.0.
 QUIET_FAR_HZ = 1e-9  # ~0.03 per year, passes the cut
 LOUD_FAR_HZ = 1e-6  # ~32 per year, fails the cut
+
+# Credible level these tests crossmatch at, and the default run_3d_spatial_crossmatch applies
+# when a caller does not name one. Kept separate so a change to the default is a visible
+# one-line test edit rather than something the suite silently follows.
+TEST_CREDIBLE_LEVEL = 0.5
+RUN_3D_DEFAULT_CREDIBLE_LEVEL = 0.5
 
 BNS_PASTRO = {"BNS": 0.95, "NSBH": 0.01, "BBH": 0.01, "Terrestrial": 0.03}
 BBH_PASTRO = {"BNS": 0.0, "NSBH": 0.0, "BBH": 0.99, "Terrestrial": 0.01}
@@ -63,6 +72,7 @@ class FakeGraceDbClient:
         self._payloads = payloads or {}
         self._errors = errors or {}
         self.queries = []
+        self.listings = []
         self.downloads = []
 
     def superevents(self, query=None, max_results=None):
@@ -76,6 +86,7 @@ class FakeGraceDbClient:
         if key in self._errors:
             raise self._errors[key]
         if filename is None:
+            self.listings.append(superevent_id)
             return FakeJsonResponse(self._files_by_id[superevent_id])
         self.downloads.append((superevent_id, filename))
         return FakeFileResponse(self._payloads[(superevent_id, filename)])
@@ -291,48 +302,67 @@ def test_load_classification_propagates_errors() -> None:
 
 
 def test_skymap_priority_ranks_pipelines_and_formats() -> None:
-    """Verify `skymap_priority` prefers Bilby over BAYESTAR, and multiorder over flat FITS"""
-    assert gracedb_tools.skymap_priority("bilby.multiorder.fits") == (
-        gracedb_tools.SKYMAP_PRIORITY_BILBY_MULTIORDER
-    )
-    assert gracedb_tools.skymap_priority("bayestar.multiorder.fits") == (
-        gracedb_tools.SKYMAP_PRIORITY_BAYESTAR_MULTIORDER
-    )
-    assert gracedb_tools.skymap_priority("cwb.multiorder.fits") == (
-        gracedb_tools.SKYMAP_PRIORITY_ANY_MULTIORDER
-    )
-    assert gracedb_tools.skymap_priority("bayestar.fits.gz") == (
-        gracedb_tools.SKYMAP_PRIORITY_BAYESTAR_FITS_GZ
-    )
-    assert gracedb_tools.skymap_priority("LALInference.fits.gz") == (
-        gracedb_tools.SKYMAP_PRIORITY_ANY_FITS_GZ
-    )
-    assert gracedb_tools.skymap_priority("skymap.fits") == gracedb_tools.SKYMAP_PRIORITY_ANY_FITS
+    """Verify `skymap_priority` ranks by pipeline and format, and versioned names below all others"""
+    # Asserted as an ordering rather than against the individual rank values, so that
+    # renumbering the table in skymap_priority does not need a matching edit here.
+    best_first = [
+        "bilby.multiorder.fits",
+        "bayestar.multiorder.fits",
+        "cwb.multiorder.fits",
+        "bayestar.fits.gz",
+        "LALInference.fits.gz",
+        "skymap.fits",
+        # The version penalty is larger than the whole span of the ranking table, so every
+        # versioned name sorts below every unversioned one: a ",N" revision of the best
+        # format loses to an unversioned copy of the worst. Ordering still holds among them.
+        "bilby.multiorder.fits,0",
+        "bayestar.multiorder.fits,0",
+    ]
+    priorities = [gracedb_tools.skymap_priority(name) for name in best_first]
+
+    assert all(better < worse for better, worse in zip(priorities, priorities[1:], strict=False))
+    assert max(priorities) < gracedb_tools.SKYMAP_PRIORITY_IGNORE
 
 
 def test_skymap_priority_is_case_insensitive() -> None:
     """Verify `skymap_priority` ranks names regardless of case"""
     assert gracedb_tools.skymap_priority("Bilby.MultiOrder.FITS") == (
-        gracedb_tools.SKYMAP_PRIORITY_BILBY_MULTIORDER
+        gracedb_tools.skymap_priority("bilby.multiorder.fits")
     )
 
 
 def test_skymap_priority_ignores_non_skymaps() -> None:
-    """Verify `skymap_priority` ranks non-FITS files at or above SKYMAP_PRIORITY_IGNORE"""
-    assert gracedb_tools.skymap_priority("p_astro.json") >= gracedb_tools.SKYMAP_PRIORITY_IGNORE
-    assert gracedb_tools.skymap_priority("coinc.xml") >= gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    """Verify `skymap_priority` ranks non-FITS files at exactly SKYMAP_PRIORITY_IGNORE"""
+    assert gracedb_tools.skymap_priority("p_astro.json") == gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    assert gracedb_tools.skymap_priority("coinc.xml") == gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    # The Bilby and BAYESTAR rules match anywhere in the name, so a skymap suffix that is
+    # not the last one must still be ignored.
+    assert gracedb_tools.skymap_priority("bilby.multiorder.fits.txt") == (
+        gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    )
 
 
-def test_skymap_priority_ranks_versioned_names_below_unversioned() -> None:
-    """Verify `skymap_priority` gives a ",N" revision its base rank plus the version penalty"""
-    penalty = gracedb_tools.SKYMAP_VERSIONED_FILE_PRIORITY_PENALTY
-    assert gracedb_tools.skymap_priority("bilby.multiorder.fits,0") == (
-        gracedb_tools.SKYMAP_PRIORITY_BILBY_MULTIORDER + penalty
-    )
-    assert gracedb_tools.skymap_priority("bayestar.fits.gz,2") == (
-        gracedb_tools.SKYMAP_PRIORITY_BAYESTAR_FITS_GZ + penalty
-    )
-    assert gracedb_tools.skymap_priority("bilby.multiorder.fits,0") < gracedb_tools.SKYMAP_PRIORITY_IGNORE
+def test_skymap_priority_ignores_without_a_version_penalty() -> None:
+    """Verify `skymap_priority` gives every ignored name the same rank, versioned or not"""
+    # choose_skymap_file discards anything at SKYMAP_PRIORITY_IGNORE without ordering them
+    # against each other, so a version penalty on top would be meaningless precision.
+    assert gracedb_tools.skymap_priority("p_astro.json,0") == gracedb_tools.SKYMAP_PRIORITY_IGNORE
+    assert gracedb_tools.skymap_priority("coinc.xml,2") == gracedb_tools.SKYMAP_PRIORITY_IGNORE
+
+
+def test_skymap_priority_warns_on_unexpected_name_shapes() -> None:
+    """Verify `skymap_priority` warns when a name is not a bare name or a single ",N" revision"""
+    for name in ("bayestar,extra.multiorder.fits", "bilby.multiorder.fits,0,1", "a,b,c.fits"):
+        with pytest.warns(UserWarning, match="neither a bare name nor a single"):
+            gracedb_tools.skymap_priority(name)
+
+
+def test_skymap_priority_stays_quiet_on_well_formed_names() -> None:
+    """Verify `skymap_priority` does not warn about the name shapes GraceDB is expected to use"""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for name in ("bayestar.multiorder.fits", "bilby.multiorder.fits,0", "p_astro.json"):
+            gracedb_tools.skymap_priority(name)
 
 
 def test_choose_skymap_file_falls_back_to_a_versioned_skymap() -> None:
@@ -419,9 +449,8 @@ def install_fake_client(monkeypatch, client):
     return constructed
 
 
-def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` returns one row per passing superevent"""
-    monkeypatch.chdir(tmp_path)
     superevent = make_superevent()
     files = {"gstlal.p_astro.json": "url", "bilby.multiorder.fits": "url"}
     payloads = {
@@ -431,7 +460,7 @@ def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path) -> None:
     client = FakeGraceDbClient([superevent], {"S190425z": files}, payloads=payloads)
     constructed = install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert len(df) == 1
     row = df.iloc[0]
@@ -448,16 +477,17 @@ def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path) -> None:
     assert row["labels"] == "PE_READY,SKYMAP_READY"
     assert row["skymap_file"] == "bilby.multiorder.fits"
     assert row["status"] == "ok"
-    expected_path = gracedb_tools.SKYMAP_DIR / "S190425z__bilby.multiorder.fits"
-    assert row["skymap_path"] == str(expected_path)
+    assert row["cache_status"] == "miss"
+    expected_path = superevent_cache.skymap_dir / "S190425z__bilby.multiorder.fits"
+    assert row["skymap_path"] == str(expected_path.resolve())
     assert expected_path.read_bytes() == b"FITS"
-    assert constructed == [((), {"service_url": gracedb_tools.GRACEDB_SERVICE_URL})]
-    assert client.queries == [(gracedb_tools.GRACEDB_QUERY, gracedb_tools.GRACEDB_MAX_RESULTS)]
+    assert constructed == [((), {"service_url": "https://gracedb.ligo.org/api/"})]
+    expected_far_hz = 2.0 / gracedb_tools.JULIAN_YEAR_SECONDS
+    assert client.queries == [(f"category: Production far < {expected_far_hz:.12g}", None)]
 
 
-def test_fetch_gracedb_superevents_drops_loud_events(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_drops_loud_events(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` applies the FAR cut before reading any file"""
-    monkeypatch.chdir(tmp_path)
     superevents = [
         make_superevent("S190425z", far=LOUD_FAR_HZ),
         make_superevent("S190426c", far=None, preferred_event_data={}),
@@ -465,13 +495,14 @@ def test_fetch_gracedb_superevents_drops_loud_events(monkeypatch, tmp_path) -> N
     client = FakeGraceDbClient(superevents, {})
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"]).empty
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
     assert client.downloads == []
 
 
-def test_fetch_gracedb_superevents_falls_back_to_the_preferred_far(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_falls_back_to_the_preferred_far(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify `fetch_gracedb_superevents` uses the preferred event's FAR when the superevent's is None"""
-    monkeypatch.chdir(tmp_path)
     superevent = make_superevent(far=QUIET_FAR_HZ)
     superevent["far"] = None
     superevent["t_0"] = None
@@ -480,16 +511,17 @@ def test_fetch_gracedb_superevents_falls_back_to_the_preferred_far(monkeypatch, 
     client = FakeGraceDbClient([superevent], {"S190425z": files}, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert df.iloc[0]["far_hz"] == QUIET_FAR_HZ
     assert df.iloc[0]["gps_time"] == GW190425_GPS
     assert df.iloc[0]["gw_time"] == GW190425_UTC
 
 
-def test_fetch_gracedb_superevents_applies_the_classification_cut(monkeypatch, tmp_path) -> None:
-    """Verify `fetch_gracedb_superevents` keeps only superevents clearing MIN_CLASSIFICATION_PROB_SUM"""
-    monkeypatch.chdir(tmp_path)
+def test_fetch_gracedb_superevents_applies_the_classification_cut(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
+    """Verify `fetch_gracedb_superevents` keeps only superevents clearing the classification cut"""
     superevents = [make_superevent("S190425z"), make_superevent("S190521g")]
     files_by_id = {sid: {"p_astro.json": "url"} for sid in ("S190425z", "S190521g")}
     payloads = {
@@ -499,13 +531,73 @@ def test_fetch_gracedb_superevents_applies_the_classification_cut(monkeypatch, t
     client = FakeGraceDbClient(superevents, files_by_id, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"])["superevent_id"].tolist() == ["S190425z"]
-    assert gracedb_tools.fetch_gracedb_superevents(["bbh"])["superevent_id"].tolist() == ["S190521g"]
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])[
+        "superevent_id"
+    ].tolist() == ["S190425z"]
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bbh"])[
+        "superevent_id"
+    ].tolist() == ["S190521g"]
 
 
-def test_fetch_gracedb_superevents_sums_requested_types(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_honors_the_classification_cut_argument(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
+    """Verify `fetch_gracedb_superevents` applies a caller-supplied min_classification_prob_sum"""
+    client = FakeGraceDbClient(
+        [make_superevent()],
+        {"S190425z": {"p_astro.json": "url"}},
+        payloads={("S190425z", "p_astro.json"): json.dumps(BNS_PASTRO).encode()},
+    )
+    install_fake_client(monkeypatch, client)
+
+    # BNS_PASTRO has p_bns 0.95, so it clears the 0.9 default but not a 0.99 cut.
+    assert (
+        len(
+            gracedb_tools.fetch_gracedb_superevents(
+                cache=superevent_cache, se_types=["bns"], min_classification_prob_sum=0.5
+            )
+        )
+        == 1
+    )
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache, se_types=["bns"], min_classification_prob_sum=0.99
+    ).empty
+
+
+def test_fetch_gracedb_superevents_honors_the_far_threshold_argument(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
+    """Verify `fetch_gracedb_superevents` applies far_threshold_per_year to the query and the rows"""
+    client = FakeGraceDbClient(
+        [make_superevent(far=QUIET_FAR_HZ)],
+        {"S190425z": {"p_astro.json": "url"}},
+        payloads={("S190425z", "p_astro.json"): json.dumps(BNS_PASTRO).encode()},
+    )
+    install_fake_client(monkeypatch, client)
+
+    # QUIET_FAR_HZ is ~0.03 per year, so a cut below that drops it locally as well as in
+    # the query string the fake client records but does not act on.
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache, se_types=["bns"], far_threshold_per_year=0.001
+    ).empty
+    expected_far_hz = 0.001 / gracedb_tools.JULIAN_YEAR_SECONDS
+    assert client.queries == [(f"category: Production far < {expected_far_hz:.12g}", None)]
+
+
+def test_fetch_gracedb_superevents_passes_max_results_through(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
+    """Verify `fetch_gracedb_superevents` forwards max_results to the GraceDB query"""
+    client = FakeGraceDbClient([], {})
+    install_fake_client(monkeypatch, client)
+
+    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"], max_results=5)
+
+    assert client.queries[0][1] == 5
+
+
+def test_fetch_gracedb_superevents_sums_requested_types(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` adds the probabilities of every requested type"""
-    monkeypatch.chdir(tmp_path)
     split = {"BNS": 0.5, "NSBH": 0.45, "BBH": 0.02, "Terrestrial": 0.03}
     client = FakeGraceDbClient(
         [make_superevent()],
@@ -514,17 +606,18 @@ def test_fetch_gracedb_superevents_sums_requested_types(monkeypatch, tmp_path) -
     )
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"]).empty
-    assert len(gracedb_tools.fetch_gracedb_superevents(["bns", "nsbh"])) == 1
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+    assert len(gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns", "nsbh"])) == 1
 
 
-def test_fetch_gracedb_superevents_records_a_file_list_failure(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_records_a_file_list_failure(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify `fetch_gracedb_superevents` keeps a stub row when the file listing cannot be read"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient([make_superevent()], {}, errors={"S190425z": RuntimeError("gracedb is down")})
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert len(df) == 1
     row = df.iloc[0]
@@ -535,9 +628,8 @@ def test_fetch_gracedb_superevents_records_a_file_list_failure(monkeypatch, tmp_
     assert "p_bns" not in df.columns
 
 
-def test_fetch_gracedb_superevents_sorts_a_stub_row_last(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_sorts_a_stub_row_last(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify a file_list_failed stub survives the gw_time sort next to a normal row"""
-    monkeypatch.chdir(tmp_path)
     superevents = [make_superevent("S190426c"), make_superevent("S190425z")]
     client = FakeGraceDbClient(
         superevents,
@@ -547,16 +639,17 @@ def test_fetch_gracedb_superevents_sorts_a_stub_row_last(monkeypatch, tmp_path) 
     )
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert df["superevent_id"].tolist() == ["S190425z", "S190426c"]
     assert pd.isna(df.iloc[1]["gw_time"])
     assert pd.isna(df.iloc[1]["p_bns"])
 
 
-def test_fetch_gracedb_superevents_drops_unreadable_classifications(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_drops_unreadable_classifications(
+    monkeypatch, tmp_path, superevent_cache
+) -> None:
     """Verify a superevent whose p_astro cannot be read is dropped by the probability cut"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient(
         [make_superevent()],
         {"S190425z": {"p_astro.json": "url"}},
@@ -564,12 +657,11 @@ def test_fetch_gracedb_superevents_drops_unreadable_classifications(monkeypatch,
     )
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(["bns"]).empty
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
 
 
-def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` keeps the row when only the skymap download fails"""
-    monkeypatch.chdir(tmp_path)
     files = {"p_astro.json": "url", "bilby.multiorder.fits": "url"}
     client = FakeGraceDbClient(
         [make_superevent()],
@@ -579,7 +671,7 @@ def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_pat
     )
     install_fake_client(monkeypatch, client)
 
-    row = gracedb_tools.fetch_gracedb_superevents(["bns"]).iloc[0]
+    row = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).iloc[0]
 
     assert row["status"] == "skymap_download_failed: 404"
     assert row["skymap_file"] == "bilby.multiorder.fits"
@@ -587,9 +679,8 @@ def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_pat
     assert row["p_bns"] == 0.95
 
 
-def test_fetch_gracedb_superevents_handles_a_missing_skymap(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_handles_a_missing_skymap(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` reports status ok when the listing has no skymap"""
-    monkeypatch.chdir(tmp_path)
     client = FakeGraceDbClient(
         [make_superevent()],
         {"S190425z": {"p_astro.json": "url"}},
@@ -597,16 +688,15 @@ def test_fetch_gracedb_superevents_handles_a_missing_skymap(monkeypatch, tmp_pat
     )
     install_fake_client(monkeypatch, client)
 
-    row = gracedb_tools.fetch_gracedb_superevents(["bns"]).iloc[0]
+    row = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).iloc[0]
 
     assert row["status"] == "ok"
     assert row["skymap_file"] is None
     assert row["skymap_path"] is None
 
 
-def test_fetch_gracedb_superevents_sorts_by_gw_time(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_sorts_by_gw_time(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` returns rows in chronological order"""
-    monkeypatch.chdir(tmp_path)
     superevents = [
         make_superevent("S190814bv", t_0=GW190425_GPS + 9_000_000),
         make_superevent("S190425z", t_0=GW190425_GPS),
@@ -616,18 +706,17 @@ def test_fetch_gracedb_superevents_sorts_by_gw_time(monkeypatch, tmp_path) -> No
     client = FakeGraceDbClient(superevents, files_by_id, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert df["superevent_id"].tolist() == ["S190425z", "S190814bv"]
     assert df.index.tolist() == [0, 1]
 
 
-def test_fetch_gracedb_superevents_returns_an_empty_frame(monkeypatch, tmp_path) -> None:
+def test_fetch_gracedb_superevents_returns_an_empty_frame(monkeypatch, tmp_path, superevent_cache) -> None:
     """Verify `fetch_gracedb_superevents` returns an empty DataFrame when nothing passes"""
-    monkeypatch.chdir(tmp_path)
     install_fake_client(monkeypatch, FakeGraceDbClient([], {}))
 
-    df = gracedb_tools.fetch_gracedb_superevents(["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
 
     assert isinstance(df, pd.DataFrame)
     assert df.empty
@@ -648,14 +737,26 @@ def test_temporal_crossmatch_matches_inside_the_window(df_sesn, gw_events) -> No
 
 def test_temporal_crossmatch_respects_the_window_edges(df_sesn, gw_events) -> None:
     """Verify `temporal_crossmatch_sesn_to_gw` includes the window edges and excludes beyond them"""
-    window = pd.Timedelta(days=gracedb_tools.TEMPORAL_WINDOW_DAYS)
+    window_days = 14
+    window = pd.Timedelta(days=window_days)
     df_sesn.loc[0, "discoverydate"] = GW190425_UTC - window
     df_sesn.loc[1, "discoverydate"] = GW190425_UTC + window + pd.Timedelta(seconds=1)
 
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=window_days)
 
     assert matches["name"].tolist() == ["2019ebq"]
-    assert matches["days_from_gw"].iloc[0] == pytest.approx(-gracedb_tools.TEMPORAL_WINDOW_DAYS)
+    assert matches["days_from_gw"].iloc[0] == pytest.approx(-window_days)
+
+
+def test_temporal_crossmatch_honors_the_window_argument(df_sesn, gw_events) -> None:
+    """Verify `temporal_crossmatch_sesn_to_gw` widens and narrows with window_days"""
+    df_sesn.loc[0, "discoverydate"] = GW190425_UTC + pd.Timedelta(days=20)
+    df_sesn.loc[1, "discoverydate"] = GW190425_UTC + pd.Timedelta(days=40)
+
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events).empty
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=30)[
+        "name"
+    ].tolist() == ["2019ebq"]
 
 
 def test_temporal_crossmatch_repeats_overlapping_events(df_sesn, gw_events) -> None:
@@ -699,7 +800,13 @@ def test_add_crossmatch_columns_copies_the_result(df_sesn) -> None:
     """Verify `add_crossmatch_columns` attaches every crossmatch field to the SN rows"""
     result = make_crossmatch_result(len(df_sesn))
 
-    out = gracedb_tools.add_crossmatch_columns(df_sesn, result, "Planck18", "dist_mpc_Planck18")
+    out = gracedb_tools.add_crossmatch_columns(
+        df_sesn,
+        result,
+        cosmology_label="Planck18",
+        distance_column="dist_mpc_Planck18",
+        credible_level=TEST_CREDIBLE_LEVEL,
+    )
 
     assert out["cosmology"].tolist() == ["Planck18"] * 2
     assert out["distance_column"].tolist() == ["dist_mpc_Planck18"] * 2
@@ -718,13 +825,19 @@ def test_add_crossmatch_columns_copies_the_result(df_sesn) -> None:
 
 
 def test_add_crossmatch_columns_flags_the_credible_level(df_sesn) -> None:
-    """Verify `add_crossmatch_columns` treats CREDIBLE_LEVEL as inclusive for both flags"""
-    level = gracedb_tools.CREDIBLE_LEVEL
+    """Verify `add_crossmatch_columns` treats credible_level as inclusive for both flags"""
+    level = TEST_CREDIBLE_LEVEL
     result = make_crossmatch_result(len(df_sesn))
     result.searched_prob = np.array([level, level + 0.01])
     result.searched_prob_vol = np.array([level + 0.01, level])
 
-    out = gracedb_tools.add_crossmatch_columns(df_sesn, result, "SHOES", "dist_mpc_SHOES")
+    out = gracedb_tools.add_crossmatch_columns(
+        df_sesn,
+        result,
+        cosmology_label="SHOES",
+        distance_column="dist_mpc_SHOES",
+        credible_level=TEST_CREDIBLE_LEVEL,
+    )
 
     assert out["inside_2d_credible_level"].tolist() == [True, False]
     assert out["inside_3d_credible_level"].tolist() == [False, True]
@@ -734,7 +847,13 @@ def test_add_crossmatch_columns_handles_missing_contours(df_sesn) -> None:
     """Verify `add_crossmatch_columns` records NaN sizes when crossmatch returned no contours"""
     result = make_crossmatch_result(len(df_sesn), contours=False)
 
-    out = gracedb_tools.add_crossmatch_columns(df_sesn, result, "SHOES", "dist_mpc_SHOES")
+    out = gracedb_tools.add_crossmatch_columns(
+        df_sesn,
+        result,
+        cosmology_label="SHOES",
+        distance_column="dist_mpc_SHOES",
+        credible_level=TEST_CREDIBLE_LEVEL,
+    )
 
     assert out["credible_volume_mpc3"].isna().all()
     assert out["credible_area_deg2"].isna().all()
@@ -745,7 +864,13 @@ def test_add_crossmatch_columns_resets_the_index(df_sesn) -> None:
     subset = df_sesn.iloc[[1]]
     result = make_crossmatch_result(1)
 
-    out = gracedb_tools.add_crossmatch_columns(subset, result, "SHOES", "dist_mpc_SHOES")
+    out = gracedb_tools.add_crossmatch_columns(
+        subset,
+        result,
+        cosmology_label="SHOES",
+        distance_column="dist_mpc_SHOES",
+        credible_level=TEST_CREDIBLE_LEVEL,
+    )
 
     assert out.index.tolist() == [0]
     assert out["searched_prob_2d"].tolist() == [0.1]
@@ -816,7 +941,7 @@ def test_run_3d_spatial_crossmatch_runs_every_cosmology(monkeypatch, temporal_ma
     assert len(reads) == 1
     assert reads[0][1] is True
     assert len(crossmatches) == len(COSMOLOGIES)
-    assert crossmatches[0][2] == (gracedb_tools.CREDIBLE_LEVEL,)
+    assert crossmatches[0][2] == (RUN_3D_DEFAULT_CREDIBLE_LEVEL,)
     assert crossmatches[0][3] == gracedb_tools.USE_COMOVING_VOLUME_RANKING
 
 
@@ -945,3 +1070,268 @@ def test_run_3d_spatial_crossmatch_returns_empty_frames(temporal_matches) -> Non
 
     assert gracedb_tools.run_3d_spatial_crossmatch(pd.DataFrame(), gw_events).empty
     assert gracedb_tools.run_3d_spatial_crossmatch(matches, pd.DataFrame()).empty
+
+
+def test_summarize_temporal_matches_counts_each_event(df_sesn, gw_events) -> None:
+    """Verify `summarize_temporal_matches` counts the SNe that matched each superevent"""
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+
+    summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
+
+    assert summary["n_temporal_sesn"].tolist() == [2]
+    assert summary["superevent_id"].tolist() == gw_events["superevent_id"].tolist()
+
+
+def test_summarize_temporal_matches_keeps_unmatched_events(df_sesn, gw_events) -> None:
+    """Verify `summarize_temporal_matches` keeps an event no SN matched, counted as zero"""
+    quiet = gw_events.copy()
+    quiet.loc[0, "superevent_id"] = "S190814bv"
+    quiet.loc[0, "gw_time"] = GW190425_UTC + pd.Timedelta(days=365)
+    events = pd.concat([gw_events, quiet], ignore_index=True)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, events)
+
+    summary = gracedb_tools.summarize_temporal_matches(matches, events)
+
+    assert summary["n_temporal_sesn"].tolist() == [2, 0]
+    assert summary["superevent_id"].tolist() == ["S190425z", "S190814bv"]
+
+
+def test_summarize_temporal_matches_preserves_the_event_columns(df_sesn, gw_events) -> None:
+    """Verify `summarize_temporal_matches` adds its column without disturbing the others"""
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+
+    summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
+
+    assert list(summary.columns) == [*gw_events.columns, "n_temporal_sesn"]
+    pd.testing.assert_frame_equal(summary[gw_events.columns], gw_events)
+
+
+def test_summarize_temporal_matches_counts_zero_when_nothing_matched(gw_events) -> None:
+    """Verify `summarize_temporal_matches` handles the bare frame an empty match returns"""
+    summary = gracedb_tools.summarize_temporal_matches(pd.DataFrame(), gw_events)
+
+    assert summary["n_temporal_sesn"].tolist() == [0]
+    assert summary["n_temporal_sesn"].dtype == int
+
+
+def test_summarize_temporal_matches_returns_an_empty_frame(df_sesn, gw_events) -> None:
+    """Verify `summarize_temporal_matches` returns an empty frame when there are no events"""
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+
+    assert gracedb_tools.summarize_temporal_matches(matches, pd.DataFrame()).empty
+
+
+@pytest.fixture(name="spatial_matches")
+def spatial_matches_fixture():
+    """Four crossmatched rows spanning every combination of the two credible-level flags."""
+    return pd.DataFrame(
+        {
+            "name": ["inside_both", "inside_3d_only", "inside_2d_only", "outside_both"],
+            "spatial_status": ["ok"] * 4,
+            "inside_2d_credible_level": [True, False, True, False],
+            "inside_3d_credible_level": [True, True, False, False],
+        }
+    )
+
+
+def test_select_coincidences_keeps_the_3d_matches(spatial_matches) -> None:
+    """Verify `select_coincidences` cuts on the 3D flag alone by default"""
+    kept = gracedb_tools.select_coincidences(spatial_matches)
+
+    assert kept["name"].tolist() == ["inside_both", "inside_3d_only"]
+    assert kept.index.tolist() == list(range(len(kept)))
+
+
+def test_select_coincidences_can_require_the_2d_level(spatial_matches) -> None:
+    """Verify `select_coincidences` also cuts on the 2D flag when asked to"""
+    kept = gracedb_tools.select_coincidences(spatial_matches, require_2d_credible_level=True)
+
+    assert kept["name"].tolist() == ["inside_both"]
+
+
+def test_select_coincidences_drops_failed_crossmatches(spatial_matches) -> None:
+    """Verify `select_coincidences` drops rows whose spatial_status is not "ok" """
+    spatial_matches.loc[0, "spatial_status"] = "missing_skymap"
+
+    kept = gracedb_tools.select_coincidences(spatial_matches)
+
+    assert kept["name"].tolist() == ["inside_3d_only"]
+
+
+def test_select_coincidences_treats_an_unmeasured_flag_as_outside(spatial_matches) -> None:
+    """Verify `select_coincidences` reads the NaN left by a missing column as outside"""
+    spatial_matches["inside_3d_credible_level"] = [True, np.nan, np.nan, np.nan]
+
+    kept = gracedb_tools.select_coincidences(spatial_matches)
+
+    assert kept["name"].tolist() == ["inside_both"]
+
+
+def test_select_coincidences_returns_an_empty_frame(spatial_matches) -> None:
+    """Verify `select_coincidences` returns an empty frame when the cut columns are absent"""
+    assert gracedb_tools.select_coincidences(pd.DataFrame()).empty
+    assert gracedb_tools.select_coincidences(spatial_matches.drop(columns="spatial_status")).empty
+    assert gracedb_tools.select_coincidences(spatial_matches.drop(columns="inside_3d_credible_level")).empty
+    # The 2D column is only required when the cut actually reads it.
+    without_2d = spatial_matches.drop(columns="inside_2d_credible_level")
+    assert not gracedb_tools.select_coincidences(without_2d).empty
+    assert gracedb_tools.select_coincidences(without_2d, require_2d_credible_level=True).empty
+
+
+def test_display_temporal_summary_shows_the_summary_columns(df_sesn, gw_events) -> None:
+    """Verify `display_temporal_summary` keeps the columns it finds, in its own order"""
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
+
+    shown = gracedb_tools.display_temporal_summary(summary)
+
+    assert list(shown.columns) == [
+        "superevent_id",
+        "gw_time",
+        "far_per_year",
+        "p_bns",
+        "p_nsbh",
+        "pipeline",
+        "search",
+        "skymap_file",
+        "n_temporal_sesn",
+        "status",
+    ]
+    assert shown["n_temporal_sesn"].tolist() == [2]
+
+
+def test_display_temporal_summary_skips_absent_names(gw_events) -> None:
+    """Verify `display_temporal_summary` drops a name the frame lacks rather than raising"""
+    summary = gracedb_tools.summarize_temporal_matches(pd.DataFrame(), gw_events)
+
+    shown = gracedb_tools.display_temporal_summary(summary.drop(columns=["pipeline", "status"]))
+
+    assert "pipeline" not in shown.columns
+    assert "status" not in shown.columns
+    assert "n_temporal_sesn" in shown.columns
+    assert gracedb_tools.display_temporal_summary(pd.DataFrame()).empty
+
+
+def test_display_coincidences_shows_the_coincidence_columns(spatial_matches) -> None:
+    """Verify `display_coincidences` keeps the columns it finds and drops the rest"""
+    kept = gracedb_tools.select_coincidences(spatial_matches)
+
+    shown = gracedb_tools.display_coincidences(kept)
+
+    # spatial_status and the two flags are in the frame; only the flags are worth showing.
+    assert list(shown.columns) == ["name", "inside_2d_credible_level", "inside_3d_credible_level"]
+    assert gracedb_tools.display_coincidences(pd.DataFrame()).empty
+
+
+# ---------------------------------------------------------------------------
+# Caching. These exercise fetch_gracedb_superevents against a warm cache; the
+# cache's own rules are unit-tested in test_gracedb_cache.py.
+# ---------------------------------------------------------------------------
+
+
+def recent_gps(*, days_ago):
+    """GPS seconds for a merger that happened days_ago, i.e. inside the default recheck window."""
+    return float(Time.now().gps) - days_ago * gracedb_tools.SECONDS_PER_DAY
+
+
+def bns_client(files=None, superevents=None):
+    """Build a fake client for one passing BNS superevent with a p_astro and a skymap."""
+    files = files or {
+        "gstlal.p_astro.json": "url",
+        "bilby.multiorder.fits": "url",
+        "bilby.multiorder.fits,0": "url",
+    }
+    payloads = {
+        ("S190425z", "gstlal.p_astro.json"): json.dumps(BNS_PASTRO).encode(),
+        ("S190425z", "bilby.multiorder.fits"): b"FITS",
+    }
+    return FakeGraceDbClient(
+        superevents if superevents is not None else [make_superevent()],
+        {"S190425z": files},
+        payloads=payloads,
+    )
+
+
+def test_fetch_gracedb_superevents_serves_a_second_run_from_cache(monkeypatch, superevent_cache) -> None:
+    """Verify a warm cache makes `fetch_gracedb_superevents` issue no per-superevent requests"""
+    client = bns_client()
+    install_fake_client(monkeypatch, client)
+
+    first = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    downloads_after_first = list(client.downloads)
+    second = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+
+    assert first.iloc[0]["cache_status"] == "miss"
+    assert second.iloc[0]["cache_status"] == "hit"
+    # Nothing further was downloaded: no p_astro, no skymap, and no file listing either.
+    assert client.downloads == downloads_after_first
+    # The rows themselves are unchanged apart from the status naming what the cache did.
+    columns = [c for c in first.columns if c != "cache_status"]
+    pd.testing.assert_frame_equal(first[columns], second[columns])
+
+
+def test_fetch_gracedb_superevents_caches_a_superevent_that_fails_the_cut(
+    monkeypatch, superevent_cache
+) -> None:
+    """Verify a superevent dropped by the classification cut is still cached"""
+    client = FakeGraceDbClient(
+        [make_superevent("S190521g")],
+        {"S190521g": {"p_astro.json": "url"}},
+        payloads={("S190521g", "p_astro.json"): json.dumps(BBH_PASTRO).encode()},
+    )
+    install_fake_client(monkeypatch, client)
+
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+    downloads_after_first = list(client.downloads)
+    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+
+    # Most superevents clearing the FAR cut fail this one, so caching them is most of the saving.
+    assert superevent_cache.read_entry("S190521g") is not None
+    assert client.downloads == downloads_after_first
+
+
+def test_fetch_gracedb_superevents_refetches_when_a_listed_field_moves(monkeypatch, superevent_cache) -> None:
+    """Verify a changed label re-reads the file listing and flags a stale fingerprint"""
+    install_fake_client(monkeypatch, bns_client())
+    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+
+    changed = make_superevent(labels=["PE_READY", "SKYMAP_READY", "ADVOK"])
+    client = bns_client(superevents=[changed])
+    install_fake_client(monkeypatch, client)
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+
+    assert df.iloc[0]["cache_status"] == "stale_fingerprint"
+    # The listing was re-read, which is the whole point of noticing the moved field. Nothing was
+    # downloaded from it, because the listing came back identical -- see the test below.
+    assert client.listings == ["S190425z"]
+    assert client.downloads == []
+
+
+# The file listing of a superevent whose skymap has been superseded: the unversioned name still
+# resolves, but now points at revision 1. This is the shape S250206dm has on the live API.
+REVISED_FILES = {
+    "gstlal.p_astro.json": "url",
+    "bilby.multiorder.fits": "url",
+    "bilby.multiorder.fits,0": "url",
+    "bilby.multiorder.fits,1": "url",
+}
+
+
+def test_fetch_gracedb_superevents_redownloads_a_superseded_skymap(monkeypatch, superevent_cache) -> None:
+    """Verify a bumped ",N" revision re-downloads the skymap behind an unchanged name"""
+    # Inside the recheck window, which is when revisions actually land: a skymap is reissued in
+    # the hours and days after an event, not years later.
+    recent = make_superevent(t_0=recent_gps(days_ago=2))
+    install_fake_client(monkeypatch, bns_client(superevents=[recent]))
+    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    skymap = superevent_cache.skymap_dir / "S190425z__bilby.multiorder.fits"
+    assert skymap.read_bytes() == b"FITS"
+
+    client = bns_client(files=REVISED_FILES, superevents=[recent])
+    client._payloads[("S190425z", "bilby.multiorder.fits")] = b"FITS REVISION 1"
+    install_fake_client(monkeypatch, client)
+    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+
+    assert df.iloc[0]["cache_status"] == "stale_age"
+    assert skymap.read_bytes() == b"FITS REVISION 1"
+    assert superevent_cache.read_entry("S190425z")["skymap_revision"] == 1

@@ -9,9 +9,10 @@ import json
 import threading
 
 import pytest
-from desi_aap import gcn_listener, gcn_notices, gcn_store
 from gcn_examples import GUANO_TRIGGER_ID, igwn_gwalert, swift_bat_guano
 from test_gcn_store import fake_resolve
+
+from desi_aap import gcn_listener, gcn_notices, gcn_store
 
 
 class FakeError:
@@ -244,8 +245,27 @@ def test_run_listener_once_drains_the_buffer_and_stops(tmp_path):
     totals = gcn_listener.run_listener(root=tmp_path, once=True, consumer=consumer, resolve=fake_resolve())
     assert totals["consumed"] == 2
     assert totals["stored"] == 2
-    # Three calls: two batches, then the empty one that ends the drain.
-    assert consumer.consume_calls == 3
+    # Two batches, then the run of empty ones that ends the drain.
+    assert consumer.consume_calls == 2 + gcn_listener.DRAIN_EMPTY_BATCHES
+    # The caller supplied the consumer, so the caller still owns closing it.
+    assert consumer.closed is False
+
+
+def test_run_listener_once_survives_a_slow_start(tmp_path):
+    """A consumer returns nothing while it is still being assigned partitions, so --once has
+    to wait that out rather than read it as a drained buffer."""
+    consumer = FakeConsumer(
+        [
+            [],  # still joining the group; no assignment yet
+            [notice_message(swift_bat_guano(1), gcn_notices.TOPIC_SWIFT_BAT_GUANO)],
+            [notice_message(swift_bat_guano(3), gcn_notices.TOPIC_SWIFT_BAT_GUANO)],
+        ]
+    )
+    totals = gcn_listener.run_listener(root=tmp_path, once=True, consumer=consumer, resolve=fake_resolve())
+    assert totals["consumed"] == 2
+    assert totals["stored"] == 2
+    # The leading empty batch did not end the drain; DRAIN_EMPTY_BATCHES of them at the end did.
+    assert consumer.consume_calls == 3 + gcn_listener.DRAIN_EMPTY_BATCHES
     # The caller supplied the consumer, so the caller still owns closing it.
     assert consumer.closed is False
 
@@ -307,3 +327,31 @@ def test_default_topics_cover_gw_grb_and_neutrino_sources():
     assert gcn_listener.DEFAULT_TOPICS == gcn_notices.DEFAULT_TOPICS
     assert gcn_notices.TOPIC_IGWN_GWALERT in gcn_listener.DEFAULT_TOPICS
     assert len(gcn_listener.DEFAULT_TOPICS) == 6
+
+
+def test_a_message_with_no_payload_is_quarantined_rather_than_crashing(tmp_path):
+    """A payload-free message has to reach the quarantine path, not break it: hashing None
+    raises from inside the except block, where nothing catches it."""
+    consumer = FakeConsumer([[FakeMessage(gcn_notices.TOPIC_BOOM, None)]])
+    counts = gcn_listener.process_batch(consumer, root=tmp_path, resolve=fake_resolve())
+    assert counts["failed"] == 1
+    assert len(consumer.committed) == 1
+    assert len(list((tmp_path / gcn_store.QUARANTINE_SUBDIR).glob("*.payload"))) == 1
+
+
+def test_a_failed_commit_does_not_stop_the_listener(tmp_path):
+    """Dying on a failed commit leaves GCN's few-day buffer to expire; the digest makes the
+    redelivery free, so the loop should log and carry on."""
+
+    class UncommittableConsumer(FakeConsumer):
+        # RuntimeError stands in for KafkaException, which cannot be imported here: the tests
+        # deliberately run with no Kafka client installed.
+        def commit(self, message):
+            raise RuntimeError("no valid assignment")
+
+    consumer = UncommittableConsumer(
+        [[notice_message(swift_bat_guano(3), gcn_notices.TOPIC_SWIFT_BAT_GUANO)]]
+    )
+    counts = gcn_listener.process_batch(consumer, root=tmp_path, resolve=fake_resolve())
+    assert counts["stored"] == 1
+    assert len(gcn_store.iter_index(root=tmp_path)) == 1

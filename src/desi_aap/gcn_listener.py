@@ -55,6 +55,12 @@ ENABLE_AUTO_COMMIT = False
 CONSUME_BATCH_SIZE = 20
 CONSUME_TIMEOUT_S = 1.0
 
+# How many consecutive empty batches --once takes as "the buffer is drained". One is not
+# enough: a freshly subscribed consumer returns nothing while it is still joining the group
+# and being assigned partitions, which takes longer than CONSUME_TIMEOUT_S. At one second a
+# batch this waits about half a minute for the stream to go quiet.
+DRAIN_EMPTY_BATCHES = 30
+
 # Credentials come from the environment, and these names match the repository secrets of the
 # same names, following the same pattern as the TNS credentials. GCN publishes no
 # environment-variable convention of its own; get the values from
@@ -265,7 +271,9 @@ def process_batch(consumer, root=STORE_ROOT, resolve=None, batch=None):
             counts["errors"] += 1
             continue
         topic = message.topic()
-        raw = message.value()
+        # A payload-free message would reach quarantine_payload() and fail there on
+        # hashing None, inside the except block where nothing would catch it.
+        raw = message.value() or b""
         try:
             entry = handle_message(topic, raw, root=root, resolve=resolve)
         # Deliberately broad: a malformed notice, a failed synthesis and a full disk all have
@@ -276,7 +284,14 @@ def process_batch(consumer, root=STORE_ROOT, resolve=None, batch=None):
             counts["failed"] += 1
         else:
             counts["stored" if entry.get("stored") else "skipped"] += 1
-        consumer.commit(message)
+        try:
+            consumer.commit(message)
+        # commit() raises on local state problems such as a revoked assignment or a closed
+        # consumer. Dying here would leave GCN's few-day buffer to expire; the payload digest
+        # makes the resulting redelivery free, so log it and keep the stream moving. Broad
+        # rather than KafkaException so the Kafka client stays a lazy import.
+        except Exception as failure:
+            LOGGER.warning("could not commit offset on %s: %s", topic, failure)
     return counts
 
 
@@ -306,8 +321,9 @@ def run_listener(
     from_earliest : bool, optional
         Whether a new group starts at the oldest buffered message.
     once : bool, optional
-        Drain the buffer until a batch comes back empty, then return, instead of running
-        indefinitely. Useful for a scheduled catch-up run or a smoke test.
+        Drain the buffer until DRAIN_EMPTY_BATCHES consecutive batches come back empty, then
+        return, instead of running indefinitely. Useful for a scheduled catch-up run or a
+        smoke test.
     consumer : object, optional
         An already-connected consumer, used instead of building one.
     stop : threading.Event, optional
@@ -330,12 +346,14 @@ def run_listener(
         stop = threading.Event()
 
     totals = {"consumed": 0, "stored": 0, "skipped": 0, "failed": 0, "errors": 0}
+    empty_batches = 0
     try:
         while not stop.is_set():
             counts = process_batch(consumer, root=root, resolve=resolve)
             for key, value in counts.items():
                 totals[key] += value
-            if once and counts["consumed"] == 0:
+            empty_batches = 0 if counts["consumed"] else empty_batches + 1
+            if once and empty_batches >= DRAIN_EMPTY_BATCHES:
                 break
     finally:
         if owns_consumer:
