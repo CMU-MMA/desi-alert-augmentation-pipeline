@@ -90,6 +90,7 @@ settings, so it stays on the command line:
 | `--dry-run` | Does all the work but writes no results to disk.                                                                                               |                                                                                                                                                   |
 | `--verbose` / `-v` | Logs at DEBUG instead of INFO. Only for this package's own logger, so dependencies stay quiet.                                                 |
 | `--log-file` | Writes the log here instead of `<output_dir>/logs/<stamp>.log`.                                                                                |
+| `--from-stage` / `--input` | Start at a later stage, with a parquet file standing in for the previous stage's output. Useful for re-running the tail of the pipeline, or testing one stage on known input. |
 
 ```bash
 desi-aap run --config config.toml --config backfill.toml
@@ -185,6 +186,19 @@ skipping, so a fresh clone runs with no Slack setup. To turn it on:
 
 `--dry-run` builds the message and logs it instead of posting, which is the
 way to preview the formatting before pointing it at a real channel.
+
+To exercise just this stage on known input -- a previous run's matches, or
+the test snapshot -- start the pipeline at it:
+
+```bash
+# Preview the message this file would produce, without posting:
+desi-aap run -c config.toml --from-stage slack_publish \
+             --input output/crossmatch/matches_<stamp>.parquet --dry-run
+
+# Post it for real, once [slack] is configured:
+desi-aap run -c config.toml --from-stage slack_publish \
+             --input output/crossmatch/matches_<stamp>.parquet
+```
 
 ## GraceDB
 
