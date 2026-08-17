@@ -19,6 +19,10 @@ dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
     "astropy>=8.0",
+    "gcn-kafka>=0.3",  # GCN Kafka client for the live notice listener. It pulls in
+                       # confluent-kafka, which is why desi_aap.gcn_listener imports it
+                       # lazily: parsing, synthesizing and storing notices all work
+                       # without a Kafka client present.
     "healpy>=1.17.1",  # 1.17.1 rather than 1.16: healpy imported scipy.integrate.trapz
                        # until then, and scipy removed it in 1.14. scipy is only a transitive
                        # dependency here, so it resolves to a current release even in the
