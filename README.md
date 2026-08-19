@@ -9,13 +9,14 @@
 
 ## Pipeline
 
-`desi-aap` runs a sequence of stages, configured by TOML. Two stages exist
+`desi-aap` runs a sequence of stages, configured by TOML. Three stages exist
 today:
 
 | Stage | Does | Writes |
 |---|---|---|
 | `query` | Queries the [BOOM](https://api.kaboom.caltech.edu) broker for alerts in a time window (`desi_aap.boom`) | `query/alerts_<stamp>.parquet` |
 | `crossmatch` | Wraps those alerts in an LSDB catalog and cross-matches them against the DESI spectroscopic catalogs (`desi_aap.stages.crossmatch`), keeping the alerts that matched | `crossmatch/matches_<stamp>.parquet` |
+| `localize` | Scores those alerts against public LIGO/Virgo superevents (`desi_aap.stages.localize`), keeping the ones inside a 3D credible volume | `localize/coincidences_<stamp>.parquet` |
 
 ### Install and run
 
@@ -30,8 +31,17 @@ desi-aap stages          # list the stages, in the order they run
 
 ### Configuration
 
-`config.toml` at the root of the repo is the main configuration file. The code
-carries no defaults, so every value the pipeline uses is written there.
+`config.toml` at the root of the repo is the main configuration file. It spells
+out every value the pipeline uses, so a run's settings can be read off one file
+rather than inferred from the code. Your own config need not: a setting with a
+default may be omitted. # TODO this last sentence is a little confusin to me, let's find a rewording
+
+`[run]`, `[query]` and `[localize]` must be present, and a useful run also needs
+at least one `[crossmatch.catalogs.<name>]` table: the stage raises without
+one, since there would be nothing to match alerts against. Within `[localize]`,
+three settings have no default and must be written down, because they are what a
+result *means* — which events were considered (`se_types`), over what stretch of
+time (`window_days`), and how tightly (`credible_level`).
 
 `output_dir` and the GraceDB `cache_dir` are relative, so a fresh clone works
 anywhere with no setup. Both therefore follow the working directory: see
@@ -70,6 +80,17 @@ catalog = "/ocean/projects/phy250012p/shared/3DTS/DESI/dr2/desi_dr2_zcat"
 radius_arcsec = 5.0
 n_neighbors = 1
 
+[localize]
+# Required: what search this is.
+se_types = ["BNS", "NSBH"]
+window_days = 14.0
+credible_level = 0.5
+# Defaulted: confidence gates and a numerical guard. Omit any of these.
+far_threshold_per_year = 2.0
+min_classification_prob_sum = 0.9
+require_2d_credible_level = false
+min_redshift = 0.0002
+
 [gracedb]
 cache_dir = "gracedb_cache"
 recheck_window = "30d"
@@ -98,25 +119,38 @@ BOOM returned 327 alerts.
 Dry run: not writing the alerts.
 Crossmatch summary: {'n_alerts': 327, 'n_matches_desi_dr1': 8, 'n_alerts_matched': 8}
 Dry run: not writing the matches.
+8 of 8 matched alerts have a usable host redshift.
+GraceDB returned 15 BNS/NSBH superevent(s) with a false-alarm rate under 2 per year.
+Localization summary: {'n_alerts': 8, 'n_alerts_with_host': 8, 'n_superevents': 15,
+ 'n_temporal_pairs': 0, 'n_alerts_temporal': 0, 'n_spatial_rows': 0,
+ 'n_spatial_failed': 0, 'n_coincidences': 0, 'n_alerts_coincident': 0}
+Dry run: not writing the coincidences.
 ```
 
 ### Output
 
 The pipeline writes intermediate results, per stage, in parquet. Each stage
-gets its own subdirectory of `run.output_dir`, and one run leaves three files:
+gets its own subdirectory of `run.output_dir`, and one run leaves four files:
 
 ```
 /output/
 ├── query/
-│   └── alerts_20260807T182718Z.parquet     # every alert BOOM returned
+│   └── alerts_20260807T182718Z.parquet        # every alert BOOM returned
 ├── crossmatch/
-│   └── matches_20260807T182718Z.parquet    # the alerts that matched a catalog
+│   └── matches_20260807T182718Z.parquet       # the alerts that matched a catalog
+├── localize/
+│   └── coincidences_20260807T182718Z.parquet  # the alerts inside a GW credible volume
 └── logs/
-    └── 20260807T182718Z.log                # what the run did
+    └── 20260807T182718Z.log                   # what the run did
 ```
 
-One timestamp, taken when the run starts, names all three - so a run's files
+One timestamp, taken when the run starts, names all four - so a run's files
 group together, and the log sits beside the results it describes.
+
+A stage that produces nothing ends the run, and writes no file. Most hours have
+no superevent within `window_days`, so `localize/` staying empty is the normal
+outcome rather than a sign that something went wrong; the log says which step
+the rows ran out at.
 
 ### Scheduled runs
 
@@ -146,13 +180,59 @@ output_dir = "/ocean/projects/phy250012p/shared/3DTS/output"
 cache_dir = "/ocean/projects/phy250012p/shared/3DTS/gracedb_cache"
 ```
 
+## The localize stage
+
+`desi_aap.gracedb_tools` does the GW matching: the temporal cut (discovery time
+against the event's `gw_time`) and the 3D spatial cut (RA/Dec/distance against the
+skymap's credible volume). It reads a flat transient table, and was written
+against TNS, which is still how the notebook
+`docs/pre_executed/gracedb_sesn_refactor.ipynb` drives it — that path is
+unchanged and keeps working.
+
+`desi_aap.stages.localize` is the pipeline's caller of the same functions. What
+it adds is the adaptation, since alerts are not TNS rows:
+
+- **Distance.** An alert carries no redshift. It takes one from the DESI host
+  the crossmatch stage attached to it: pooling the matches from every
+  `[crossmatch.catalogs.*]` table and keeping the **nearest** host with
+  `ZWARN == 0` and a redshift at or above `min_redshift`. Which catalog that
+  turns out to be is decided by the association, not by config order, and is
+  recorded per row in `host_catalog`. An alert with no such host is dropped —
+  there is no distance to put it at.
+- **Time.** `candidate.jd`, read as a UTC Julian date, stands in for
+  `discoverydate`. It is a detection rather than a discovery, so an object
+  detected repeatedly is offered to the temporal window once per alert.
+
+Every catalog in `[crossmatch.catalogs.*]` is read for a redshift, so one that
+carries no `Z` column raises rather than being skipped.
+
+### What it writes
+
+One row per alert, keeping the shape the crossmatch stage established: the
+alert's own columns, its DESI matches in their nested columns, and the GW
+results in a new nested `gw_matches` column — one entry per (superevent,
+cosmology), since each cosmology puts the same alert at a different luminosity
+distance. The row also gains `host_catalog`, `host_redshift`,
+`host_sep_arcsec` and one `dist_mpc_<label>` per cosmology.
+
+Only the alerts that landed inside the `credible_level` volume are written, the
+way `crossmatch` writes only the alerts that matched. The temporal matches and
+near misses behind them are counted in the summary and logged, not persisted:
+
+```
+Localization summary: {'n_alerts': 8, 'n_alerts_with_host': 8, 'n_superevents': 15,
+ 'n_temporal_pairs': 8, 'n_alerts_temporal': 8, 'n_spatial_rows': 16,
+ 'n_spatial_failed': 0, 'n_coincidences': 0, 'n_alerts_coincident': 0}
+```
+
+`n_spatial_failed` counts rows whose skymap was missing, unreadable, or carried
+no distance columns; when it is non-zero the log breaks it down by reason.
+
 ## GraceDB
 
-`desi_aap.gracedb_tools` matches supernovae from TNS against public LIGO/Virgo
-superevents. It is not a pipeline stage yet — it is driven from
-`docs/pre_executed/gracedb_sesn_refactor.ipynb` — so `desi-aap run` does not
-touch it, and the `[gracedb]` section only takes effect for code that loads the
-config and passes the cache in:
+The superevent metadata and skymaps the stage matches against are cached on
+disk. The `[gracedb]` section says where, and is read both by `desi-aap run` and
+by anything that loads the config itself:
 
 ```python
 from desi_aap.config import load_config

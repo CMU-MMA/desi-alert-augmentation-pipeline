@@ -46,9 +46,49 @@ radius_arcsec = 5.0
 n_neighbors = 1
 
 # ===========================================================================
+# Stage: localize -- score the matched alerts against GW event localizations.
+# Each alert takes its distance from the nearest DESI host matched above, and
+# is kept if it lands inside a superevent's 3D credible volume.
+# ===========================================================================
+
+[localize]
+# --- Required: what search this is. No defaults, because these three are what a
+# result means, and only credible_level is recorded in the stage's output.
+
+# Source classes an event must be, summed over, to be worth matching against.
+# One or more of "BNS", "NSBH", "BBH". BNS and NSBH involve a neutron star, so
+# they are the ones expected to produce an optical counterpart.
+se_types = ["BNS", "NSBH"]
+# Half-width of the temporal window, in days either side of the event's
+# gw_time. An alert is considered for an event only if it was detected inside
+# it -- including before it, since the window is symmetric.
+window_days = 14.0
+# Credible level the skymap contours are computed at, and that an alert must
+# fall inside to count as a coincidence. Note GW localizations are conventionally
+# quoted at the 90% credible region, so this is a much tighter cut.
+credible_level = 0.5
+
+# --- Defaulted: gates on detection confidence, and one numerical guard. Any of
+# these may be left out; the values below are the ones the code would apply.
+
+# False-alarm-rate cut, in events per Julian year: how often a detector network
+# would produce a signal this loud from noise alone.
+far_threshold_per_year = 2.0
+# Combined p_astro probability across se_types an event must exceed.
+min_classification_prob_sum = 0.9
+# Whether an alert must also fall inside the 2D (sky-only) credible level. The
+# 2D and 3D rankings are not nested, so requiring both discards real 3D
+# coincidences -- an alert whose sky position is unremarkable but whose
+# distance lands on a high-density slice of the distance posterior.
+require_2d_credible_level = false
+# Smallest host redshift treated as a real measurement. Below this there is no
+# usable luminosity distance: a z of 0 puts the alert at the origin, and a
+# small negative one makes the coordinate conversion raise.
+min_redshift = 0.0002
+
+# ===========================================================================
 # GraceDB -- superevent metadata and skymap cache.
-# Read by desi_aap.gracedb_tools; not a pipeline stage yet, so nothing in
-# `desi-aap run` touches this section.
+# Read by desi_aap.gracedb_tools, and so by the localize stage above.
 # ===========================================================================
 
 [gracedb]
