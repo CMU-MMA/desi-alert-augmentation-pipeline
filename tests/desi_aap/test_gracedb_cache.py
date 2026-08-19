@@ -244,10 +244,11 @@ def test_cache_defaults_its_recheck_window_to_thirty_days(superevent_cache) -> N
 # The [gracedb] config section, which is how a cache is built in production.
 # ---------------------------------------------------------------------------
 
-# The two sections PipelineConfig requires, so a [gracedb] table can be validated on its own.
+# The sections PipelineConfig requires, so a [gracedb] table can be validated on its own.
 REQUIRED_SECTIONS = {
     "run": {"output_dir": "out"},
     "query": {"boom": {"survey": "LSST"}, "window": {"lookback": "1h"}},
+    "localize": {"se_types": ["BNS"], "window_days": 14.0, "credible_level": 0.5},
 }
 
 
