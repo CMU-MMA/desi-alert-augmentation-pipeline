@@ -127,9 +127,9 @@ def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
     found = f"{n_rows} candidate{'' if n_rows == 1 else 's'} found"
     cutoff = f". Showing the first {max_rows}:" if n_rows > max_rows else ":"
 
-    # Each column is (name, its cells as strings, whether it holds numbers).
-    # Only floats count as numeric: the integer columns are identifiers, which
-    # raw_number cells could reformat.
+    # Each column is (name, its cells as strings, whether it right-aligns).
+    # Measures right-align like numbers; the integer identifiers stay left,
+    # like labels.
     shown = frame.head(max_rows)
     columns = [
         (name, [_format_cell(value) for value in shown[name]], shown[name].dtype.kind == "f")
@@ -142,10 +142,12 @@ def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
         for name in _match_columns(frame)
     ]
 
+    # Every cell is raw_text, holding our own formatting: as of 2026-08 Slack's
+    # validator rejects the raw_number cells its docs describe (it wants an
+    # undocumented `value` field), and a preformatted string renders the same.
     header_row = [{"type": "raw_text", "text": name} for name, _, _ in columns]
     value_rows = [
-        [{"type": "raw_number" if numeric else "raw_text", "text": cells[i]} for _, cells, numeric in columns]
-        for i in range(len(shown))
+        [{"type": "raw_text", "text": cells[i]} for _, cells, _ in columns] for i in range(len(shown))
     ]
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*\n{found}{cutoff}"}},
@@ -183,8 +185,9 @@ def post_message(token: str, channel: str, text: str, blocks: list[dict[str, Any
     Raises
     ------
     RuntimeError
-        If Slack rejects the message, naming its error code -- and, for the
-        two codes that mean the bot cannot see the channel, the fix.
+        If Slack rejects the message, naming its error code and whatever
+        detail messages came with it -- and, for the two codes that mean the
+        bot cannot see the channel, the fix.
     """
     try:
         WebClient(token=token).chat_postMessage(channel=channel, text=text, blocks=blocks)
@@ -193,7 +196,14 @@ def post_message(token: str, channel: str, text: str, blocks: list[dict[str, Any
         hint = ""
         if error in ("not_in_channel", "channel_not_found"):
             hint = f" Make sure the channel exists and the bot has been invited: /invite in {channel}."
-        raise RuntimeError(f"Slack rejected the message: {error}.{hint}") from exc
+        # invalid_blocks and friends come with per-field schema messages;
+        # surface a few so the failure can be read without a debugger.
+        messages = (exc.response.get("response_metadata") or {}).get("messages") or []
+        detail = ""
+        if messages:
+            more = f" (+{len(messages) - 5} more)" if len(messages) > 5 else ""
+            detail = f" Details: {'; '.join(messages[:5])}{more}"
+        raise RuntimeError(f"Slack rejected the message: {error}.{hint}{detail}") from exc
 
 
 def run_slack_publish(

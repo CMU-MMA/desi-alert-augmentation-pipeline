@@ -187,8 +187,10 @@ skipping, so a fresh clone runs with no Slack setup. To turn it on:
 `--dry-run` builds the message and logs it instead of posting, which is the
 way to preview the formatting before pointing it at a real channel.
 
-To exercise just this stage on known input -- a previous run's matches, or
-the test snapshot -- start the pipeline at it:
+To exercise just this stage on known input, start the pipeline at it. Any
+previous run's matches file works, or build one from the committed test data
+(`python scripts/make_test_matches.py test_matches.parquet`, with `--rows` to
+tile it bigger):
 
 ```bash
 # Preview the message this file would produce, without posting:

@@ -85,8 +85,10 @@ def test_the_message_lists_rows_and_cuts_off(matches):
     rows = table["rows"]
     assert len(rows) == 6
     assert [cell["text"] for cell in rows[0]] == ["objectId", "candidate.ra", "candidate.dec", "desi_dr1"]
-    # Identifiers stay raw_text so Slack cannot reformat them; measures are numbers.
-    assert [cell["type"] for cell in rows[1]] == ["raw_text", "raw_number", "raw_number", "raw_number"]
+    # Every cell is raw_text -- Slack rejects its documented raw_number shape --
+    # with measures right-aligned per column instead.
+    assert all(cell["type"] == "raw_text" for row in rows for cell in row)
+    assert [setting["align"] for setting in table["column_settings"]] == ["left", "right", "right", "right"]
 
 
 def test_a_short_message_has_no_cutoff_line(matches):
@@ -177,6 +179,23 @@ def test_a_slack_error_names_the_code_and_the_fix(monkeypatch):
     monkeypatch.setattr(slack_publish, "WebClient", RejectingWebClient)
 
     with pytest.raises(RuntimeError, match="not_in_channel.*invited"):
+        post_message("xoxb-test-token", "#desi-alerts", "hello")
+
+
+def test_a_slack_error_surfaces_the_schema_details(monkeypatch):
+    details = [f"[ERROR] problem {i} [json-pointer:/blocks/1]" for i in range(7)]
+    response = {"error": "invalid_blocks", "response_metadata": {"messages": details}}
+
+    class RejectingWebClient:
+        def __init__(self, token):
+            pass
+
+        def chat_postMessage(self, **kwargs):  # noqa: N802 -- the slack_sdk method name
+            raise SlackApiError("rejected", response)
+
+    monkeypatch.setattr(slack_publish, "WebClient", RejectingWebClient)
+
+    with pytest.raises(RuntimeError, match=r"invalid_blocks.*problem 0.*problem 4.*\(\+2 more\)"):
         post_message("xoxb-test-token", "#desi-alerts", "hello")
 
 
