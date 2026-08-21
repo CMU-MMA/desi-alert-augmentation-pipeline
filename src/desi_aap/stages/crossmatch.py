@@ -22,6 +22,7 @@ import lsdb
 import nested_pandas as npd
 import pandas as pd
 
+from desi_aap.boom import ALERT_DEC_COLUMN, ALERT_RA_COLUMN
 from desi_aap.config import PipelineConfig
 from desi_aap.stages.base import StageInputs, StageResult, input_result, write_frame
 from desi_aap.stages.query import STAGE as QUERY_STAGE
@@ -34,10 +35,6 @@ STAGE = "crossmatch"
 
 # Prefix of the parquet file this stage writes.
 OUTPUT_PREFIX = "matches"
-
-# Coordinate columns produced by desi_aap.boom's default pipeline.
-ALERT_RA_COLUMN = "candidate.ra"
-ALERT_DEC_COLUMN = "candidate.dec"
 
 
 @dataclass(frozen=True)

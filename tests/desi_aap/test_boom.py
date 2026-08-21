@@ -251,6 +251,25 @@ def test_assert_alerts_equal_detects_nested_differences() -> None:
         gold_standard.assert_alerts_equal(fresh, other)
 
 
+def test_the_default_pipeline_projects_every_named_alert_column() -> None:
+    """Verify the JSON projection carries every column boom names as a constant
+
+    The two are separate spellings of one schema, so a rename that moves only
+    one leaves the constants naming columns the alert frame does not have.
+    """
+    projected = set()
+    for stage in boom.load_default_pipeline():
+        projected |= set(stage.get("$project", {}))
+
+    for column in (
+        boom.ALERT_ID_COLUMN,
+        boom.ALERT_RA_COLUMN,
+        boom.ALERT_DEC_COLUMN,
+        boom.ALERT_TIME_COLUMN,
+    ):
+        assert column in projected, f"{column} is named in boom but not projected"
+
+
 def test_load_default_pipeline() -> None:
     """The default pipeline loads from JSON with booleans intact."""
     pipeline = boom.load_default_pipeline()
