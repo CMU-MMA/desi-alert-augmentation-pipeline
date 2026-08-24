@@ -45,7 +45,7 @@ dependencies = [
 desi-aap = "desi_aap.cli:app"
 
 [project.urls]
-"Source Code" = "https://github.com/CMU-MMA/desi_aap"
+"Source Code" = "https://github.com/CMU-MMA/desi-alert-augmentation-pipeline"
 
 # On a mac, install optional dependencies with `pip install '.[dev]'` (include the single quotes)
 [project.optional-dependencies]
