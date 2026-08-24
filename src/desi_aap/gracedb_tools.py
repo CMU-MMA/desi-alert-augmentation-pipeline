@@ -1078,12 +1078,10 @@ def select_coincidences(spatial_matches, *, require_2d_credible_level):
         unreadable contributes nothing rather than contributing an unmeasured row.
     require_2d_credible_level : bool
         Whether a row must fall inside the 2D credible level as well as the 3D one. The
-        pipeline sets it False, because the two are not nested quantities: searched_prob_vol
-        can be well inside the contour while searched_prob_2d is outside it, for an SN whose
-        sky position is unremarkable but whose distance lands on a high-density slice of
-        the distance posterior. Requiring both therefore discards real 3D coincidences,
-        which is a defensible thing to want.  #TODO: Check whether False is the right value
-        for the pipeline to set.
+        two are not nested quantities, so a row can satisfy one and not the other:
+        searched_prob_vol can be well inside the contour while searched_prob_2d is outside
+        it, for an SN whose sky position is unremarkable but whose distance lands on a
+        high-density slice of the distance posterior.
 
     Returns
     -------

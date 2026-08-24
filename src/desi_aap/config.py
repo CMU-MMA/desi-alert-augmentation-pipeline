@@ -98,6 +98,10 @@ class LocalizeConfig(_Section):
     # it from here.
     far_threshold_per_year: float = Field(default=2.0, gt=0)
     min_classification_prob_sum: float = Field(default=0.9, ge=0, le=1)
+    # False because requiring both rankings discards real 3D coincidences, which is what
+    # this pipeline is looking for. See select_coincidences for why the two can disagree.
+    # TODO: check whether False is the right value here (inherited from notebook, but let's
+    # explicitly confirm)
     require_2d_credible_level: bool = False
     min_redshift: float = Field(default=0.0002, gt=0)
 
