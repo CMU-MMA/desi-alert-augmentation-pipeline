@@ -29,6 +29,19 @@ extensions = ["sphinx.ext.mathjax", "sphinx.ext.napoleon", "sphinx.ext.viewcode"
 extensions.append("autoapi.extension")
 extensions.append("nbsphinx")
 
+# -- napoleon configuration -------------------------------------------------
+## renders the "Attributes" section of a class docstring as a field list rather
+## than as a second set of attribute directives, which would collide with the
+## ones autoapi already emits for the same names.
+napoleon_use_ivar = True
+
+# -- myst-parser configuration ----------------------------------------------
+## pull the repo README (Markdown) straight into the home page.
+extensions.append("myst_parser")
+## generates anchors for h1-h3, so the README's internal links resolve.
+myst_heading_anchors = 3
+
+
 # -- sphinx-copybutton configuration ----------------------------------------
 extensions.append("sphinx_copybutton")
 ## sets up the expected prompt text from console blocks, and excludes it from
@@ -40,7 +53,12 @@ copybutton_prompt_text = ">> "
 copybutton_selector = "div:not(.no-copybutton) > div.highlight > pre"
 
 templates_path = []
-exclude_patterns = ["_build", "**.ipynb_checkpoints"]
+exclude_patterns = [
+    "_build",
+    "build",
+    "**.ipynb_checkpoints",
+    "**/README.md",
+]
 
 # This assumes that sphinx-build is called from the root directory
 master_doc = "index"
@@ -55,4 +73,4 @@ autoapi_ignore = ["*/__main__.py", "*/_version.py"]
 autoapi_add_toc_tree_entry = False
 autoapi_member_order = "bysource"
 
-html_theme = "sphinx_rtd_theme"
+html_theme = "sphinx_book_theme"

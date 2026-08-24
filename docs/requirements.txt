@@ -3,8 +3,9 @@ ipykernel
 ipython
 jupytext
 nbconvert
+myst-parser
 nbsphinx
 sphinx
 sphinx-autoapi
 sphinx-copybutton
-sphinx-rtd-theme>=3.0
+sphinx-book-theme
