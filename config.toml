@@ -77,8 +77,8 @@ far_threshold_per_year = 2.0
 # Combined p_astro probability across se_types an event must exceed.
 min_classification_prob_sum = 0.9
 # Whether an alert must also fall inside the 2D (sky-only) credible level. The
-# 2D and 3D rankings are not nested, so requiring both discards real 3D
-# coincidences -- an alert whose sky position is unremarkable but whose
+# 2D and 3D regions do not contain one another, so requiring both discards real
+# 3D coincidences -- an alert whose sky position is unremarkable but whose
 # distance lands on a high-density slice of the distance posterior.
 require_2d_credible_level = false
 # Smallest host redshift treated as a real measurement. Below this there is no

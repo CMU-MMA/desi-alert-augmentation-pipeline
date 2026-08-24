@@ -337,7 +337,7 @@ def coincident_localizations(
         made against.
     require_2d_credible_level : bool
         Whether a coincidence must also fall inside the 2D credible level. The
-        two rankings are not nested, so requiring both discards real 3D
+        two regions do not contain one another, so requiring both discards real 3D
         coincidences; see gracedb_tools.select_coincidences.
 
     Returns

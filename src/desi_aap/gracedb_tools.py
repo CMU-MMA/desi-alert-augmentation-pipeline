@@ -881,8 +881,8 @@ def add_crossmatch_columns(sn_rows, result, *, cosmology_label, distance_column,
             every row, or NaN if crossmatch returned no contours.
         inside_2d_credible_level, inside_3d_credible_level
             Whether the SN falls inside the credible_level contour under the 2D and 3D
-            rankings. These are not nested quantities, so an SN can be inside one and
-            outside the other.
+            rankings. At a given level neither region contains the other, so an SN can
+            be inside one and outside the other.
     """
     out = sn_rows.copy().reset_index(drop=True)
     out["cosmology"] = cosmology_label
@@ -1077,11 +1077,11 @@ def select_coincidences(spatial_matches, *, require_2d_credible_level):
         spatial_status is not "ok" are dropped, so an event whose skymap was missing or
         unreadable contributes nothing rather than contributing an unmeasured row.
     require_2d_credible_level : bool
-        Whether a row must fall inside the 2D credible level as well as the 3D one. The
-        two are not nested quantities, so a row can satisfy one and not the other:
-        searched_prob_vol can be well inside the contour while searched_prob_2d is outside
-        it, for an SN whose sky position is unremarkable but whose distance lands on a
-        high-density slice of the distance posterior.
+        Whether a row must fall inside the 2D credible level as well as the 3D one. At a
+        given level neither region contains the other, so a row can satisfy one and not
+        the other: searched_prob_vol can be well inside the contour while searched_prob_2d
+        is outside it, for an SN whose sky position is unremarkable but whose distance
+        lands on a high-density slice of the distance posterior.
 
     Returns
     -------
