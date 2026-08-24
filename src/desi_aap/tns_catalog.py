@@ -148,6 +148,10 @@ def clean_tns_catalog(
         either cosmology, so it excludes the Local Group along with the z <= 0 placeholders;
         see the Notes below for why the floor exists at all. Defaults to 0.0002.
 
+        This floor is this module's own. [localize] carries one too, but it floors the
+        DESI *host* redshift the pipeline reads, not the TNS object's own, so the two
+        are separate settings that happen to agree rather than one value in two places.
+
     Returns
     -------
     pandas.DataFrame

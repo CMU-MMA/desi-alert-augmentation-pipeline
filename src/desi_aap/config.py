@@ -93,12 +93,9 @@ class LocalizeConfig(_Section):
     credible_level: float = Field(gt=0, le=1)
 
     # Defaulted, because these gate detection confidence or guard the arithmetic rather
-    # than stating what the search was.
-    # TODO: all four mirror a default the code already carries -- the first three in
-    # gracedb_tools, min_redshift in tns_catalog -- so the numbers live in two places and
-    # a change to one will not follow the other. Removing them from those modules, leaving
-    # this section as their single home, is left to a follow-up: it changes gracedb_tools'
-    # public API and the notebook calls those functions relying on the defaults.
+    # than stating what the search was. This is where the pipeline's defaults live:
+    # gracedb_tools carries none of its own, so a caller either names a value or takes
+    # it from here.
     far_threshold_per_year: float = Field(default=2.0, gt=0)
     min_classification_prob_sum: float = Field(default=0.9, ge=0, le=1)
     require_2d_credible_level: bool = False

@@ -1,3 +1,4 @@
+import inspect
 import json
 import warnings
 from types import SimpleNamespace
@@ -14,15 +15,19 @@ from desi_aap.cosmology import COSMOLOGIES
 GW190425_GPS = 1240215503.017147
 GW190425_UTC = pd.Timestamp("2019-04-25 08:18:05.017147", tz="UTC")
 
-# FAR values in Hz that land either side of the default far_threshold_per_year of 2.0.
+# The cuts these tests apply. gracedb_tools carries no defaults of its own, so every
+# call names them; these mirror the pipeline's values in [localize] without being tied
+# to them, so a change there is a visible one-line edit here rather than something the
+# suite silently follows.
+TEST_FAR_THRESHOLD_PER_YEAR = 2.0
+TEST_MIN_CLASSIFICATION_PROB_SUM = 0.9
+TEST_REQUIRE_2D_CREDIBLE_LEVEL = False
+TEST_CREDIBLE_LEVEL = 0.5
+TEST_WINDOW_DAYS = 14
+
+# FAR values in Hz that land either side of TEST_FAR_THRESHOLD_PER_YEAR.
 QUIET_FAR_HZ = 1e-9  # ~0.03 per year, passes the cut
 LOUD_FAR_HZ = 1e-6  # ~32 per year, fails the cut
-
-# Credible level these tests crossmatch at, and the default run_3d_spatial_crossmatch applies
-# when a caller does not name one. Kept separate so a change to the default is a visible
-# one-line test edit rather than something the suite silently follows.
-TEST_CREDIBLE_LEVEL = 0.5
-RUN_3D_DEFAULT_CREDIBLE_LEVEL = 0.5
 
 BNS_PASTRO = {"BNS": 0.95, "NSBH": 0.01, "BBH": 0.01, "Terrestrial": 0.03}
 BBH_PASTRO = {"BNS": 0.0, "NSBH": 0.0, "BBH": 0.99, "Terrestrial": 0.01}
@@ -460,7 +465,12 @@ def test_fetch_gracedb_superevents_builds_a_row(monkeypatch, tmp_path, supereven
     client = FakeGraceDbClient([superevent], {"S190425z": files}, payloads=payloads)
     constructed = install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert len(df) == 1
     row = df.iloc[0]
@@ -495,7 +505,12 @@ def test_fetch_gracedb_superevents_drops_loud_events(monkeypatch, tmp_path, supe
     client = FakeGraceDbClient(superevents, {})
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    ).empty
     assert client.downloads == []
 
 
@@ -511,7 +526,12 @@ def test_fetch_gracedb_superevents_falls_back_to_the_preferred_far(
     client = FakeGraceDbClient([superevent], {"S190425z": files}, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert df.iloc[0]["far_hz"] == QUIET_FAR_HZ
     assert df.iloc[0]["gps_time"] == GW190425_GPS
@@ -531,12 +551,18 @@ def test_fetch_gracedb_superevents_applies_the_classification_cut(
     client = FakeGraceDbClient(superevents, files_by_id, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])[
-        "superevent_id"
-    ].tolist() == ["S190425z"]
-    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bbh"])[
-        "superevent_id"
-    ].tolist() == ["S190521g"]
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )["superevent_id"].tolist() == ["S190425z"]
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bbh"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )["superevent_id"].tolist() == ["S190521g"]
 
 
 def test_fetch_gracedb_superevents_honors_the_classification_cut_argument(
@@ -554,13 +580,19 @@ def test_fetch_gracedb_superevents_honors_the_classification_cut_argument(
     assert (
         len(
             gracedb_tools.fetch_gracedb_superevents(
-                cache=superevent_cache, se_types=["bns"], min_classification_prob_sum=0.5
+                cache=superevent_cache,
+                se_types=["bns"],
+                min_classification_prob_sum=0.5,
+                far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
             )
         )
         == 1
     )
     assert gracedb_tools.fetch_gracedb_superevents(
-        cache=superevent_cache, se_types=["bns"], min_classification_prob_sum=0.99
+        cache=superevent_cache,
+        se_types=["bns"],
+        min_classification_prob_sum=0.99,
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
     ).empty
 
 
@@ -578,7 +610,10 @@ def test_fetch_gracedb_superevents_honors_the_far_threshold_argument(
     # QUIET_FAR_HZ is ~0.03 per year, so a cut below that drops it locally as well as in
     # the query string the fake client records but does not act on.
     assert gracedb_tools.fetch_gracedb_superevents(
-        cache=superevent_cache, se_types=["bns"], far_threshold_per_year=0.001
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=0.001,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
     ).empty
     expected_far_hz = 0.001 / gracedb_tools.JULIAN_YEAR_SECONDS
     assert client.queries == [(f"category: Production far < {expected_far_hz:.12g}", None)]
@@ -591,7 +626,13 @@ def test_fetch_gracedb_superevents_passes_max_results_through(
     client = FakeGraceDbClient([], {})
     install_fake_client(monkeypatch, client)
 
-    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"], max_results=5)
+    gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        max_results=5,
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert client.queries[0][1] == 5
 
@@ -606,8 +647,23 @@ def test_fetch_gracedb_superevents_sums_requested_types(monkeypatch, tmp_path, s
     )
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
-    assert len(gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns", "nsbh"])) == 1
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    ).empty
+    assert (
+        len(
+            gracedb_tools.fetch_gracedb_superevents(
+                cache=superevent_cache,
+                se_types=["bns", "nsbh"],
+                far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+                min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+            )
+        )
+        == 1
+    )
 
 
 def test_fetch_gracedb_superevents_records_a_file_list_failure(
@@ -617,7 +673,12 @@ def test_fetch_gracedb_superevents_records_a_file_list_failure(
     client = FakeGraceDbClient([make_superevent()], {}, errors={"S190425z": RuntimeError("gracedb is down")})
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert len(df) == 1
     row = df.iloc[0]
@@ -639,7 +700,12 @@ def test_fetch_gracedb_superevents_sorts_a_stub_row_last(monkeypatch, tmp_path, 
     )
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert df["superevent_id"].tolist() == ["S190425z", "S190426c"]
     assert pd.isna(df.iloc[1]["gw_time"])
@@ -657,7 +723,12 @@ def test_fetch_gracedb_superevents_drops_unreadable_classifications(
     )
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    ).empty
 
 
 def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_path, superevent_cache) -> None:
@@ -671,7 +742,12 @@ def test_fetch_gracedb_superevents_records_a_skymap_failure(monkeypatch, tmp_pat
     )
     install_fake_client(monkeypatch, client)
 
-    row = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).iloc[0]
+    row = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    ).iloc[0]
 
     assert row["status"] == "skymap_download_failed: 404"
     assert row["skymap_file"] == "bilby.multiorder.fits"
@@ -688,7 +764,12 @@ def test_fetch_gracedb_superevents_handles_a_missing_skymap(monkeypatch, tmp_pat
     )
     install_fake_client(monkeypatch, client)
 
-    row = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).iloc[0]
+    row = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    ).iloc[0]
 
     assert row["status"] == "ok"
     assert row["skymap_file"] is None
@@ -706,7 +787,12 @@ def test_fetch_gracedb_superevents_sorts_by_gw_time(monkeypatch, tmp_path, super
     client = FakeGraceDbClient(superevents, files_by_id, payloads=payloads)
     install_fake_client(monkeypatch, client)
 
-    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert df["superevent_id"].tolist() == ["S190425z", "S190814bv"]
     assert df.index.tolist() == [0, 1]
@@ -716,7 +802,12 @@ def test_fetch_gracedb_superevents_returns_an_empty_frame(monkeypatch, tmp_path,
     """Verify `fetch_gracedb_superevents` returns an empty DataFrame when nothing passes"""
     install_fake_client(monkeypatch, FakeGraceDbClient([], {}))
 
-    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert isinstance(df, pd.DataFrame)
     assert df.empty
@@ -724,7 +815,7 @@ def test_fetch_gracedb_superevents_returns_an_empty_frame(monkeypatch, tmp_path,
 
 def test_temporal_crossmatch_matches_inside_the_window(df_sesn, gw_events) -> None:
     """Verify `temporal_crossmatch_sesn_to_gw` copies the event's fields onto each match"""
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=TEST_WINDOW_DAYS)
 
     assert matches["name"].tolist() == ["2019ebq", "2019eff"]
     assert (matches["superevent_id"] == "S190425z").all()
@@ -753,7 +844,9 @@ def test_temporal_crossmatch_honors_the_window_argument(df_sesn, gw_events) -> N
     df_sesn.loc[0, "discoverydate"] = GW190425_UTC + pd.Timedelta(days=20)
     df_sesn.loc[1, "discoverydate"] = GW190425_UTC + pd.Timedelta(days=40)
 
-    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events).empty
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(
+        df_sesn, gw_events, window_days=TEST_WINDOW_DAYS
+    ).empty
     assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=30)[
         "name"
     ].tolist() == ["2019ebq"]
@@ -766,7 +859,7 @@ def test_temporal_crossmatch_repeats_overlapping_events(df_sesn, gw_events) -> N
     second["gw_time"] = GW190425_UTC + pd.Timedelta(days=1)
     gw_events = pd.concat([gw_events, second.to_frame().T], ignore_index=True)
 
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=TEST_WINDOW_DAYS)
 
     assert len(matches) == 4
     assert matches["superevent_id"].tolist() == ["S190425z"] * 2 + ["S190426c"] * 2
@@ -777,21 +870,31 @@ def test_temporal_crossmatch_skips_events_without_a_time(df_sesn, gw_events) -> 
     """Verify `temporal_crossmatch_sesn_to_gw` ignores events whose gw_time is missing"""
     gw_events.loc[0, "gw_time"] = pd.NaT
 
-    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events).empty
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(
+        df_sesn, gw_events, window_days=TEST_WINDOW_DAYS
+    ).empty
 
 
 def test_temporal_crossmatch_returns_empty_frames(df_sesn, gw_events) -> None:
     """Verify `temporal_crossmatch_sesn_to_gw` returns an empty frame for empty or unmatched input"""
-    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(pd.DataFrame(), gw_events).empty
-    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, pd.DataFrame()).empty
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(
+        pd.DataFrame(), gw_events, window_days=TEST_WINDOW_DAYS
+    ).empty
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(
+        df_sesn, pd.DataFrame(), window_days=TEST_WINDOW_DAYS
+    ).empty
 
     df_sesn["discoverydate"] = GW190425_UTC + pd.Timedelta(days=365)
-    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events).empty
+    assert gracedb_tools.temporal_crossmatch_sesn_to_gw(
+        df_sesn, gw_events, window_days=TEST_WINDOW_DAYS
+    ).empty
 
 
 def test_temporal_crossmatch_prints_when_verbose(df_sesn, gw_events, capsys) -> None:
     """Verify `temporal_crossmatch_sesn_to_gw` reports each event it checks when verbose"""
-    gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, verbose=True)
+    gracedb_tools.temporal_crossmatch_sesn_to_gw(
+        df_sesn, gw_events, verbose=True, window_days=TEST_WINDOW_DAYS
+    )
 
     assert "S190425z" in capsys.readouterr().out
 
@@ -922,7 +1025,7 @@ def temporal_matches_fixture(df_sesn, gw_events, tmp_path):
     skymap_path = tmp_path / "S190425z__bayestar.multiorder.fits"
     skymap_path.write_bytes(b"FITS")
     gw_events.loc[0, "skymap_path"] = str(skymap_path)
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=TEST_WINDOW_DAYS)
     return matches, gw_events
 
 
@@ -931,7 +1034,7 @@ def test_run_3d_spatial_crossmatch_runs_every_cosmology(monkeypatch, temporal_ma
     matches, gw_events = temporal_matches
     reads, crossmatches = install_fake_skymap(monkeypatch)
 
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
+    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL)
 
     assert len(df) == 2 * len(COSMOLOGIES)
     assert sorted(df["cosmology"].unique()) == sorted(COSMOLOGIES)
@@ -941,7 +1044,7 @@ def test_run_3d_spatial_crossmatch_runs_every_cosmology(monkeypatch, temporal_ma
     assert len(reads) == 1
     assert reads[0][1] is True
     assert len(crossmatches) == len(COSMOLOGIES)
-    assert crossmatches[0][2] == (RUN_3D_DEFAULT_CREDIBLE_LEVEL,)
+    assert crossmatches[0][2] == (TEST_CREDIBLE_LEVEL,)
     assert crossmatches[0][3] == gracedb_tools.USE_COMOVING_VOLUME_RANKING
 
 
@@ -950,7 +1053,7 @@ def test_run_3d_spatial_crossmatch_uses_the_cosmology_distance(monkeypatch, temp
     matches, gw_events = temporal_matches
     _, crossmatches = install_fake_skymap(monkeypatch)
 
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
+    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL)
 
     for label in COSMOLOGIES:
         rows = df[df["cosmology"] == label]
@@ -968,7 +1071,7 @@ def test_run_3d_spatial_crossmatch_skips_non_finite_distances(monkeypatch, tempo
     matches.loc[0, f"dist_mpc_{label}"] = np.nan
     install_fake_skymap(monkeypatch)
 
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
+    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL)
 
     assert df[df["cosmology"] == label]["name"].tolist() == ["2019eff"]
     assert len(df) == 2 * len(COSMOLOGIES) - 1
@@ -985,7 +1088,7 @@ def test_run_3d_spatial_crossmatch_caches_skymaps(monkeypatch, temporal_matches)
     matches = pd.concat([matches, second_matches], ignore_index=True)
     reads, _ = install_fake_skymap(monkeypatch)
 
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
+    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL)
 
     assert len(reads) == 1
     assert len(df) == 4 * len(COSMOLOGIES)
@@ -1010,7 +1113,7 @@ def test_run_3d_spatial_crossmatch_reports_a_missing_skymap(monkeypatch, tempora
     gw_events["skymap_path"] = gw_events["skymap_path"].astype(object)
     gw_events.loc[0, "skymap_path"] = missing
 
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
+    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL)
 
     assert df["spatial_status"].tolist() == ["missing_skymap"] * 2
     assert not df["inside_2d_credible_level"].any()
@@ -1023,7 +1126,7 @@ def test_run_3d_spatial_crossmatch_reports_a_read_failure(monkeypatch, temporal_
     matches, gw_events = temporal_matches
     install_fake_skymap(monkeypatch, read_error=OSError("corrupt FITS"))
 
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
+    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL)
 
     assert df["spatial_status"].tolist() == ["skymap_read_failed: corrupt FITS"] * 2
     assert df["cosmology"].isna().all()
@@ -1034,7 +1137,7 @@ def test_run_3d_spatial_crossmatch_requires_distance_columns(monkeypatch, tempor
     matches, gw_events = temporal_matches
     install_fake_skymap(monkeypatch, skymap=FakeSkymap(colnames=("UNIQ", "PROBDENSITY")))
 
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
+    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL)
 
     assert df["spatial_status"].tolist() == ["skymap_has_no_distance_columns"] * 2
 
@@ -1044,7 +1147,7 @@ def test_run_3d_spatial_crossmatch_reports_a_crossmatch_failure(monkeypatch, tem
     matches, gw_events = temporal_matches
     install_fake_skymap(monkeypatch, crossmatch_error=ValueError("bad skymap"))
 
-    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events)
+    df = gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL)
 
     assert len(df) == 2 * len(COSMOLOGIES)
     assert (df["spatial_status"] == "crossmatch_failed: bad skymap").all()
@@ -1061,20 +1164,26 @@ def test_run_3d_spatial_crossmatch_skips_unknown_superevents(monkeypatch, tempor
     matches["superevent_id"] = "S000000a"
     install_fake_skymap(monkeypatch)
 
-    assert gracedb_tools.run_3d_spatial_crossmatch(matches, gw_events).empty
+    assert gracedb_tools.run_3d_spatial_crossmatch(
+        matches, gw_events, credible_level=TEST_CREDIBLE_LEVEL
+    ).empty
 
 
 def test_run_3d_spatial_crossmatch_returns_empty_frames(temporal_matches) -> None:
     """Verify `run_3d_spatial_crossmatch` returns an empty frame when either input is empty"""
     matches, gw_events = temporal_matches
 
-    assert gracedb_tools.run_3d_spatial_crossmatch(pd.DataFrame(), gw_events).empty
-    assert gracedb_tools.run_3d_spatial_crossmatch(matches, pd.DataFrame()).empty
+    assert gracedb_tools.run_3d_spatial_crossmatch(
+        pd.DataFrame(), gw_events, credible_level=TEST_CREDIBLE_LEVEL
+    ).empty
+    assert gracedb_tools.run_3d_spatial_crossmatch(
+        matches, pd.DataFrame(), credible_level=TEST_CREDIBLE_LEVEL
+    ).empty
 
 
 def test_summarize_temporal_matches_counts_each_event(df_sesn, gw_events) -> None:
     """Verify `summarize_temporal_matches` counts the SNe that matched each superevent"""
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=TEST_WINDOW_DAYS)
 
     summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
 
@@ -1088,7 +1197,7 @@ def test_summarize_temporal_matches_keeps_unmatched_events(df_sesn, gw_events) -
     quiet.loc[0, "superevent_id"] = "S190814bv"
     quiet.loc[0, "gw_time"] = GW190425_UTC + pd.Timedelta(days=365)
     events = pd.concat([gw_events, quiet], ignore_index=True)
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, events, window_days=TEST_WINDOW_DAYS)
 
     summary = gracedb_tools.summarize_temporal_matches(matches, events)
 
@@ -1098,7 +1207,7 @@ def test_summarize_temporal_matches_keeps_unmatched_events(df_sesn, gw_events) -
 
 def test_summarize_temporal_matches_preserves_the_event_columns(df_sesn, gw_events) -> None:
     """Verify `summarize_temporal_matches` adds its column without disturbing the others"""
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=TEST_WINDOW_DAYS)
 
     summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
 
@@ -1116,7 +1225,7 @@ def test_summarize_temporal_matches_counts_zero_when_nothing_matched(gw_events) 
 
 def test_summarize_temporal_matches_returns_an_empty_frame(df_sesn, gw_events) -> None:
     """Verify `summarize_temporal_matches` returns an empty frame when there are no events"""
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=TEST_WINDOW_DAYS)
 
     assert gracedb_tools.summarize_temporal_matches(matches, pd.DataFrame()).empty
 
@@ -1136,7 +1245,9 @@ def spatial_matches_fixture():
 
 def test_select_coincidences_keeps_the_3d_matches(spatial_matches) -> None:
     """Verify `select_coincidences` cuts on the 3D flag alone by default"""
-    kept = gracedb_tools.select_coincidences(spatial_matches)
+    kept = gracedb_tools.select_coincidences(
+        spatial_matches, require_2d_credible_level=TEST_REQUIRE_2D_CREDIBLE_LEVEL
+    )
 
     assert kept["name"].tolist() == ["inside_both", "inside_3d_only"]
     assert kept.index.tolist() == list(range(len(kept)))
@@ -1153,7 +1264,9 @@ def test_select_coincidences_drops_failed_crossmatches(spatial_matches) -> None:
     """Verify `select_coincidences` drops rows whose spatial_status is not "ok" """
     spatial_matches.loc[0, "spatial_status"] = "missing_skymap"
 
-    kept = gracedb_tools.select_coincidences(spatial_matches)
+    kept = gracedb_tools.select_coincidences(
+        spatial_matches, require_2d_credible_level=TEST_REQUIRE_2D_CREDIBLE_LEVEL
+    )
 
     assert kept["name"].tolist() == ["inside_3d_only"]
 
@@ -1162,25 +1275,37 @@ def test_select_coincidences_treats_an_unmeasured_flag_as_outside(spatial_matche
     """Verify `select_coincidences` reads the NaN left by a missing column as outside"""
     spatial_matches["inside_3d_credible_level"] = [True, np.nan, np.nan, np.nan]
 
-    kept = gracedb_tools.select_coincidences(spatial_matches)
+    kept = gracedb_tools.select_coincidences(
+        spatial_matches, require_2d_credible_level=TEST_REQUIRE_2D_CREDIBLE_LEVEL
+    )
 
     assert kept["name"].tolist() == ["inside_both"]
 
 
 def test_select_coincidences_returns_an_empty_frame(spatial_matches) -> None:
     """Verify `select_coincidences` returns an empty frame when the cut columns are absent"""
-    assert gracedb_tools.select_coincidences(pd.DataFrame()).empty
-    assert gracedb_tools.select_coincidences(spatial_matches.drop(columns="spatial_status")).empty
-    assert gracedb_tools.select_coincidences(spatial_matches.drop(columns="inside_3d_credible_level")).empty
+    assert gracedb_tools.select_coincidences(
+        pd.DataFrame(), require_2d_credible_level=TEST_REQUIRE_2D_CREDIBLE_LEVEL
+    ).empty
+    assert gracedb_tools.select_coincidences(
+        spatial_matches.drop(columns="spatial_status"),
+        require_2d_credible_level=TEST_REQUIRE_2D_CREDIBLE_LEVEL,
+    ).empty
+    assert gracedb_tools.select_coincidences(
+        spatial_matches.drop(columns="inside_3d_credible_level"),
+        require_2d_credible_level=TEST_REQUIRE_2D_CREDIBLE_LEVEL,
+    ).empty
     # The 2D column is only required when the cut actually reads it.
     without_2d = spatial_matches.drop(columns="inside_2d_credible_level")
-    assert not gracedb_tools.select_coincidences(without_2d).empty
+    assert not gracedb_tools.select_coincidences(
+        without_2d, require_2d_credible_level=TEST_REQUIRE_2D_CREDIBLE_LEVEL
+    ).empty
     assert gracedb_tools.select_coincidences(without_2d, require_2d_credible_level=True).empty
 
 
 def test_display_temporal_summary_shows_the_summary_columns(df_sesn, gw_events) -> None:
     """Verify `display_temporal_summary` keeps the columns it finds, in its own order"""
-    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events)
+    matches = gracedb_tools.temporal_crossmatch_sesn_to_gw(df_sesn, gw_events, window_days=TEST_WINDOW_DAYS)
     summary = gracedb_tools.summarize_temporal_matches(matches, gw_events)
 
     shown = gracedb_tools.display_temporal_summary(summary)
@@ -1214,7 +1339,9 @@ def test_display_temporal_summary_skips_absent_names(gw_events) -> None:
 
 def test_display_coincidences_shows_the_coincidence_columns(spatial_matches) -> None:
     """Verify `display_coincidences` keeps the columns it finds and drops the rest"""
-    kept = gracedb_tools.select_coincidences(spatial_matches)
+    kept = gracedb_tools.select_coincidences(
+        spatial_matches, require_2d_credible_level=TEST_REQUIRE_2D_CREDIBLE_LEVEL
+    )
 
     shown = gracedb_tools.display_coincidences(kept)
 
@@ -1257,9 +1384,19 @@ def test_fetch_gracedb_superevents_serves_a_second_run_from_cache(monkeypatch, s
     client = bns_client()
     install_fake_client(monkeypatch, client)
 
-    first = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    first = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
     downloads_after_first = list(client.downloads)
-    second = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    second = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert first.iloc[0]["cache_status"] == "miss"
     assert second.iloc[0]["cache_status"] == "hit"
@@ -1281,9 +1418,19 @@ def test_fetch_gracedb_superevents_caches_a_superevent_that_fails_the_cut(
     )
     install_fake_client(monkeypatch, client)
 
-    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    ).empty
     downloads_after_first = list(client.downloads)
-    assert gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"]).empty
+    assert gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    ).empty
 
     # Most superevents clearing the FAR cut fail this one, so caching them is most of the saving.
     assert superevent_cache.read_entry("S190521g") is not None
@@ -1293,12 +1440,22 @@ def test_fetch_gracedb_superevents_caches_a_superevent_that_fails_the_cut(
 def test_fetch_gracedb_superevents_refetches_when_a_listed_field_moves(monkeypatch, superevent_cache) -> None:
     """Verify a changed label re-reads the file listing and flags a stale fingerprint"""
     install_fake_client(monkeypatch, bns_client())
-    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     changed = make_superevent(labels=["PE_READY", "SKYMAP_READY", "ADVOK"])
     client = bns_client(superevents=[changed])
     install_fake_client(monkeypatch, client)
-    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert df.iloc[0]["cache_status"] == "stale_fingerprint"
     # The listing was re-read, which is the whole point of noticing the moved field. Nothing was
@@ -1323,15 +1480,44 @@ def test_fetch_gracedb_superevents_redownloads_a_superseded_skymap(monkeypatch, 
     # the hours and days after an event, not years later.
     recent = make_superevent(t_0=recent_gps(days_ago=2))
     install_fake_client(monkeypatch, bns_client(superevents=[recent]))
-    gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
     skymap = superevent_cache.skymap_dir / "S190425z__bilby.multiorder.fits"
     assert skymap.read_bytes() == b"FITS"
 
     client = bns_client(files=REVISED_FILES, superevents=[recent])
     client._payloads[("S190425z", "bilby.multiorder.fits")] = b"FITS REVISION 1"
     install_fake_client(monkeypatch, client)
-    df = gracedb_tools.fetch_gracedb_superevents(cache=superevent_cache, se_types=["bns"])
+    df = gracedb_tools.fetch_gracedb_superevents(
+        cache=superevent_cache,
+        se_types=["bns"],
+        far_threshold_per_year=TEST_FAR_THRESHOLD_PER_YEAR,
+        min_classification_prob_sum=TEST_MIN_CLASSIFICATION_PROB_SUM,
+    )
 
     assert df.iloc[0]["cache_status"] == "stale_age"
     assert skymap.read_bytes() == b"FITS REVISION 1"
     assert superevent_cache.read_entry("S190425z")["skymap_revision"] == 1
+
+
+@pytest.mark.parametrize(
+    ("function", "parameter"),
+    [
+        (gracedb_tools.fetch_gracedb_superevents, "far_threshold_per_year"),
+        (gracedb_tools.fetch_gracedb_superevents, "min_classification_prob_sum"),
+        (gracedb_tools.temporal_crossmatch_sesn_to_gw, "window_days"),
+        (gracedb_tools.run_3d_spatial_crossmatch, "credible_level"),
+        (gracedb_tools.select_coincidences, "require_2d_credible_level"),
+    ],
+)
+def test_no_scientific_cut_carries_a_default(function, parameter) -> None:
+    """Verify this module states no cut of its own, so the pipeline's live only in [localize]
+
+    A default here would be a second place for a value to be defined, and nothing
+    would keep it in step with the config the pipeline actually runs from.
+    """
+    assert inspect.signature(function).parameters[parameter].default is inspect.Parameter.empty
