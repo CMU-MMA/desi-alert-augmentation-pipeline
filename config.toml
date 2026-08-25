@@ -46,6 +46,21 @@ radius_arcsec = 5.0
 n_neighbors = 1
 
 # ===========================================================================
+# Stage: slack_publish -- post the run's matched alerts to a Slack channel.
+# Optional: without this section the stage skips itself, so a fresh clone
+# runs with no Slack app. The pipeline stops before this stage when an
+# earlier one produces no rows, so an empty run posts nothing.
+# ===========================================================================
+
+# [slack]
+# # TOML file holding `bot_token = "xoxb-..."`. Keep it outside the repo;
+# # see the README for how to register the app and get a token.
+# credentials = "~/.config/desi_aap/slack.toml"
+# channel = "#desi-alerts"
+# # Candidates listed in the message before it cuts off.
+# max_rows = 20
+
+# ===========================================================================
 # GraceDB -- superevent metadata and skymap cache.
 # Read by desi_aap.gracedb_tools; not a pipeline stage yet, so nothing in
 # `desi-aap run` touches this section.

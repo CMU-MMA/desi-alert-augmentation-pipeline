@@ -4,11 +4,13 @@
 import logging
 from pathlib import Path
 
+import nested_pandas as npd
 import typer
 
 from desi_aap.config import ConfigError, load_config
 from desi_aap.log import run_log_path, setup_logging
 from desi_aap.pipeline import STAGE_ORDER, run_pipeline
+from desi_aap.stages.base import StageInputs, StageResult
 from desi_aap.utils import run_stamp
 
 logger = logging.getLogger(__name__)
@@ -46,8 +48,37 @@ def run(
         "--log-file",
         help="Write the log here instead of under <output_dir>/logs/.",
     ),
+    from_stage: str | None = typer.Option(
+        None,
+        "--from-stage",
+        help="Start at this stage instead of the first, feeding it --input. "
+        "See `desi-aap stages` for the names.",
+    ),
+    input_path: Path | None = typer.Option(
+        None,
+        "--input",
+        help="Parquet file standing in for the previous stage's output. "
+        "Requires --from-stage, and vice versa.",
+    ),
 ) -> None:
     """Run the pipeline."""
+    if (from_stage is None) != (input_path is None):
+        typer.echo("error: --from-stage and --input go together; give both or neither.", err=True)
+        raise typer.Exit(2)
+    if from_stage is not None:
+        if from_stage not in STAGE_ORDER:
+            typer.echo(
+                f"error: unknown stage {from_stage!r}. Stages, in order: {', '.join(STAGE_ORDER)}.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        if from_stage == STAGE_ORDER[0]:
+            typer.echo(
+                f"error: {from_stage!r} is already the first stage; run without --from-stage.",
+                err=True,
+            )
+            raise typer.Exit(2)
+
     try:
         cfg = load_config(config_paths)
     except ConfigError as exc:
@@ -59,7 +90,16 @@ def run(
     setup_logging(log_path, verbose=verbose)
 
     try:
-        run_pipeline(cfg, dry_run=dry_run, stamp=timestamp)
+        inputs: StageInputs | None = None
+        if from_stage is not None:
+            # The file stands in for the output of the stage just before the
+            # one we start at, which is what that stage consumes.
+            previous = STAGE_ORDER[STAGE_ORDER.index(from_stage) - 1]
+            frame = npd.read_parquet(input_path)
+            inputs = {
+                previous: StageResult(stage=previous, frame=frame, output_path=input_path, stamp=timestamp)
+            }
+        run_pipeline(cfg, dry_run=dry_run, stamp=timestamp, start=from_stage, inputs=inputs)
     except Exception:
         logger.exception("Pipeline failed.")
         raise typer.Exit(1) from None
