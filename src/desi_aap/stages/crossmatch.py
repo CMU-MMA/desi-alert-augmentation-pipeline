@@ -250,7 +250,7 @@ def catalog_specs(cfg: PipelineConfig) -> list[CatalogSpec]:
 
     Parameters
     ----------
-    cfg : PipelineConfig
+    cfg : desi_aap.config.PipelineConfig
         The pipeline configuration.
 
     Returns
@@ -295,7 +295,7 @@ def run_crossmatch(
 
     Parameters
     ----------
-    cfg : PipelineConfig
+    cfg : desi_aap.config.PipelineConfig
         The pipeline configuration, normally from
         :func:`desi_aap.config.load_config`.
     dry_run : bool

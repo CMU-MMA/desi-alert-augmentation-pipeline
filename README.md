@@ -5,6 +5,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/desi-aap?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/desi-aap/)
 [![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/CMU-MMA/desi-alert-augmentation-pipeline/smoke-test.yml)](https://github.com/CMU-MMA/desi-alert-augmentation-pipeline/actions/workflows/smoke-test.yml)
+[![Read the Docs](https://img.shields.io/readthedocs/desi-aap)](https://desi-aap.readthedocs.io/)
 [![Codecov](https://codecov.io/gh/CMU-MMA/desi-alert-augmentation-pipeline/branch/main/graph/badge.svg)](https://codecov.io/gh/CMU-MMA/desi-alert-augmentation-pipeline)
 
 ## Pipeline

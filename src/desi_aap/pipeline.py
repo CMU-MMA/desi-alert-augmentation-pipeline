@@ -49,7 +49,7 @@ def run_pipeline(
 
     Parameters
     ----------
-    cfg : PipelineConfig
+    cfg : desi_aap.config.PipelineConfig
         The configuration for this run.
     dry_run : bool
         Passed to every stage: do the work but write nothing.
