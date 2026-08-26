@@ -33,7 +33,7 @@ def test_run_from_a_stage_skips_the_earlier_ones(
 
 
 def test_an_unknown_start_stage_names_the_real_ones(pipeline_config):
-    with pytest.raises(ValueError, match="query, crossmatch, slack_publish"):
+    with pytest.raises(ValueError, match="query, crossmatch, localize, slack_publish"):
         pipeline.run_pipeline(pipeline_config, start="does_not_exist")
 
 

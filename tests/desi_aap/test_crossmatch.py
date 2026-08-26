@@ -31,7 +31,7 @@ def unmatched_alerts(gold_standard_alerts):
     return {QUERY_STAGE: StageResult(stage=QUERY_STAGE, frame=frame)}
 
 
-def test_run_crossmatch(pipeline_config, alert_inputs, stub_boom):
+def test_run_crossmatch(pipeline_config, alert_inputs, stub_boom, stub_gracedb):
     """Verify unmatched alerts are filtered out, so the filter does real work"""
     result = run_crossmatch(pipeline_config, inputs=alert_inputs, stamp="20260807T120000Z")
 

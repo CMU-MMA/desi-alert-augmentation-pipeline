@@ -2,6 +2,11 @@
 
 Provides the temporal crossmatch (discovery time vs. GW time) and the 3D
 spatial crossmatch (RA/Dec/distance vs. the GW skymap's credible volume).
+
+None of the cuts these functions apply carries a default. A caller names each
+one, or takes the pipeline's from the ``[localize]`` table in ``config.toml``. A
+default here would be a second place for a value to live, with nothing keeping
+it in step with the config a run was actually made from.
 """
 
 import json
@@ -368,8 +373,8 @@ def fetch_gracedb_superevents(
     se_types,
     *,
     cache,
-    far_threshold_per_year=2.0,
-    min_classification_prob_sum=0.9,
+    far_threshold_per_year,
+    min_classification_prob_sum,
     max_results=None,
     force_refresh=False,
 ):
@@ -400,13 +405,12 @@ def fetch_gracedb_superevents(
         Where the per-superevent metadata and the skymaps are kept. Required, and with no
         default anywhere in the call chain, so the location is always an explicit decision;
         build one from the pipeline config with GraceDbConfig.to_cache().
-    far_threshold_per_year : float, optional
+    far_threshold_per_year : float
         False-alarm-rate cut in events per Julian year. Applied twice: once in the GraceDB
         query itself, converted to the Hz the API expects, and once locally, since a
         superevent whose own FAR is missing is judged on its preferred event's instead.
-        Defaults to 2.0.
-    min_classification_prob_sum : float, optional
-        Minimum combined p_astro probability across se_types, exclusive. Defaults to 0.9.
+    min_classification_prob_sum : float
+        Minimum combined p_astro probability across se_types, exclusive.
         # TODO ask about mins for things like just BBH selection - confirmed that 0.9 is good
     max_results : int or None, optional
         Cap on the number of superevents the query returns, passed straight to
@@ -639,7 +643,7 @@ def fetch_gracedb_superevents(
 
 
 def temporal_crossmatch_sesn_to_gw(
-    df_sesn, gw_events, *, window_days=14, verbose=False
+    df_sesn, gw_events, *, window_days, verbose=False
 ):  # TODO may want to generalize beyond just sesn
     """Match SNe to GW events whose discovery date falls within the temporal window.
 
@@ -655,9 +659,9 @@ def temporal_crossmatch_sesn_to_gw(
     gw_events : pandas.DataFrame
         Superevent table from fetch_gracedb_superevents. Events with a missing gw_time are
         skipped.
-    window_days : float, optional
+    window_days : float
         Half-width of the matching window in days, applied either side of gw_time and
-        inclusive at both ends. Defaults to 14.
+        inclusive at both ends.
     verbose : bool, optional
         If True, print each event as it is checked. Defaults to False.
 
@@ -877,8 +881,8 @@ def add_crossmatch_columns(sn_rows, result, *, cosmology_label, distance_column,
             every row, or NaN if crossmatch returned no contours.
         inside_2d_credible_level, inside_3d_credible_level
             Whether the SN falls inside the credible_level contour under the 2D and 3D
-            rankings. These are not nested quantities, so an SN can be inside one and
-            outside the other.
+            rankings. At a given level neither region contains the other, so an SN can
+            be inside one and outside the other.
     """
     out = sn_rows.copy().reset_index(drop=True)
     out["cosmology"] = cosmology_label
@@ -942,7 +946,7 @@ def failed_spatial_rows(sn_rows, status, cosmology=np.nan, credible_level=np.nan
     return out
 
 
-def run_3d_spatial_crossmatch(temporal_matches, gw_events, *, credible_level=0.5):
+def run_3d_spatial_crossmatch(temporal_matches, gw_events, *, credible_level):
     """Run the 3D credible-volume crossmatch for each cosmology on every temporal match.
 
     Groups the temporally matched SNe by superevent, reads each event's skymap once and
@@ -960,11 +964,10 @@ def run_3d_spatial_crossmatch(temporal_matches, gw_events, *, credible_level=0.5
     gw_events : pandas.DataFrame
         Superevent table from fetch_gracedb_superevents, used to look up each event's
         skymap_path by superevent_id. Superevents absent from it are skipped.
-    credible_level : float, optional
+    credible_level : float
         Credible level the contours are computed at and the inside_*_credible_level flags
-        are judged against. This is the one place the pipeline's chosen level is defaulted;
-        it is recorded on every successful row, so downstream consumers read it from the
-        frame rather than assuming a value. Defaults to 0.5.
+        are judged against. Recorded on every successful row, so downstream consumers read
+        it from the frame rather than assuming a value.
 
     Returns
     -------
@@ -1062,7 +1065,7 @@ def run_3d_spatial_crossmatch(temporal_matches, gw_events, *, credible_level=0.5
     return df.reset_index(drop=True)
 
 
-def select_coincidences(spatial_matches, *, require_2d_credible_level=False):
+def select_coincidences(spatial_matches, *, require_2d_credible_level):
     """Keep the crossmatched rows whose SN landed inside the GW credible volume.
 
     The final cut of the pipeline: what survives here is the candidate list.
@@ -1073,13 +1076,12 @@ def select_coincidences(spatial_matches, *, require_2d_credible_level=False):
         Output of run_3d_spatial_crossmatch, one row per (SN, event, cosmology). Rows whose
         spatial_status is not "ok" are dropped, so an event whose skymap was missing or
         unreadable contributes nothing rather than contributing an unmeasured row.
-    require_2d_credible_level : bool, optional
-        Whether a row must fall inside the 2D credible level as well as the 3D one.
-        Defaults to False, because the two are not nested quantities: searched_prob_vol can
-        be well inside the contour while searched_prob_2d is outside it, for an SN whose
-        sky position is unremarkable but whose distance lands on a high-density slice of
-        the distance posterior. Requiring both therefore discards real 3D coincidences,
-        which is a defensible thing to want but not the default.  #TODO: Check with Xander about default.
+    require_2d_credible_level : bool
+        Whether a row must fall inside the 2D credible level as well as the 3D one. At a
+        given level neither region contains the other, so a row can satisfy one and not
+        the other: searched_prob_vol can be well inside the contour while searched_prob_2d
+        is outside it, for an SN whose sky position is unremarkable but whose distance
+        lands on a high-density slice of the distance posterior.
 
     Returns
     -------

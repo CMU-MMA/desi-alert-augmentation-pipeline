@@ -10,7 +10,7 @@ from desi_aap import pipeline
 from desi_aap.stages.query import STAGE, resolve_window, run_query
 
 
-def test_run_query(pipeline_config, stub_boom):
+def test_run_query(pipeline_config, stub_boom, stub_gracedb):
     """Verify the stage writes parquet and hands the same frame to the next stage"""
     result = run_query(pipeline_config, stamp="20260807T120000Z")
 

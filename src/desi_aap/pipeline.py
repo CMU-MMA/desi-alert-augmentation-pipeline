@@ -5,6 +5,7 @@ from collections.abc import Callable
 from desi_aap.config import PipelineConfig
 from desi_aap.stages.base import StageInputs, StageResult
 from desi_aap.stages.crossmatch import run_crossmatch
+from desi_aap.stages.localize import run_localize
 from desi_aap.stages.query import run_query
 from desi_aap.stages.slack_publish import run_slack_publish
 from desi_aap.utils import run_stamp
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 STAGE_ORDER = [
     "query",
     "crossmatch",
+    "localize",
     "slack_publish",
 ]
 
@@ -26,6 +28,7 @@ STAGE_ORDER = [
 STAGE_RUNNERS: dict[str, Callable[..., StageResult]] = {
     "query": run_query,
     "crossmatch": run_crossmatch,
+    "localize": run_localize,
     "slack_publish": run_slack_publish,
 }
 

@@ -81,6 +81,49 @@ class CrossmatchCatalogConfig(_Section):
     n_neighbors: int = Field(ge=1)
 
 
+class LocalizeConfig(_Section):
+    """The ``[localize]`` section: which superevents to score alerts against, and how."""
+
+    # Required, because these three are what a result means: which events were
+    # considered, over what stretch of time, and how tightly. Only credible_level is
+    # recorded in the stage's output, so an inherited value for the other two could not
+    # be recovered from the results afterwards.
+    se_types: list[str]
+    window_days: float = Field(gt=0)
+    credible_level: float = Field(gt=0, le=1)
+
+    # Defaulted, because these gate detection confidence or guard the arithmetic rather
+    # than stating what the search was. This is where the pipeline's defaults live:
+    # gracedb_tools carries none of its own, so a caller either names a value or takes
+    # it from here.
+    far_threshold_per_year: float = Field(default=2.0, gt=0)
+    min_classification_prob_sum: float = Field(default=0.9, ge=0, le=1)
+    # False because requiring both rankings discards real 3D coincidences, which is what
+    # this pipeline is looking for. See select_coincidences for why the two can disagree.
+    # TODO: check whether False is the right value here (inherited from notebook, but let's
+    # explicitly confirm)
+    require_2d_credible_level: bool = False
+    min_redshift: float = Field(default=0.0002, gt=0)
+
+    @model_validator(mode="after")
+    def _check_se_types(self) -> "LocalizeConfig":
+        """Reject a class name p_astro does not carry, which would silently match nothing.
+
+        The names are looked up in the p_astro payload, and a miss reads as a
+        probability of zero rather than as an error, so an unrecognized one would
+        leave every superevent failing the classification cut and the stage
+        reporting an honest-looking zero.
+        """
+        known = {"BNS", "NSBH", "BBH"}
+        unknown = sorted({t for t in self.se_types if t.upper() not in known})
+        if not self.se_types or unknown:
+            raise ValueError(
+                f"se_types must name at least one of {', '.join(sorted(known))}"
+                + (f"; got {', '.join(unknown)}" if unknown else "")
+            )
+        return self
+
+
 class DaskConfig(_Section):
     """A ``[dask]`` table: arguments passed straight to ``dask.distributed.Client``."""
 
@@ -176,6 +219,7 @@ class PipelineConfig(_Section):
     run: RunConfig
     query: QueryConfig
     crossmatch: CrossmatchConfig = CrossmatchConfig()
+    localize: LocalizeConfig
     dask: DaskConfig = DaskConfig()
     gracedb: GraceDbConfig = GraceDbConfig()
     # Optional, unlike the sections above: a fresh clone has no Slack app or
