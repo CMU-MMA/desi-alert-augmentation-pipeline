@@ -47,6 +47,14 @@ TimeLike = Union[Time, datetime, str, float, int]
 # Width of the query window when only one bound (or neither) is given.
 DEFAULT_WINDOW = timedelta(hours=1)
 
+# Columns of the alert frame BOOM returns, in the names it gives them. The
+# projection in default_pipeline.json decides which columns come back at all,
+# so a rename has to move both.
+ALERT_ID_COLUMN = "objectId"
+ALERT_RA_COLUMN = "candidate.ra"
+ALERT_DEC_COLUMN = "candidate.dec"
+ALERT_TIME_COLUMN = "candidate.jd"
+
 # Nested column names to use for known list-valued BOOM fields. Nested-pandas
 # uses ``"<nested>.<field>"`` to address sub-columns, so a nested column may not
 # itself contain a dot; anything not listed here gets its dots replaced with
@@ -382,7 +390,7 @@ def query_alerts(
     survey: str = "LSST",
     pipeline: list[dict[str, Any]] | None = None,
     limit: int | None = None,
-    sort_by: str | None = "candidate.jd",
+    sort_by: str | None = ALERT_TIME_COLUMN,
     sort_order: str = "Descending",
     permissions: dict[str, Any] | None = None,
     nested_names: Mapping[str, str] | None = None,

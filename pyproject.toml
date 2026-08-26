@@ -37,6 +37,7 @@ dependencies = [
     "lsdb>=0.10.4", # Crossmatching
     "pyarrow>=16",  # Parquet reading and writing
     "pydantic>=2.0", # Validates the TOML configuration file
+    "slack-sdk>=3.27",  # Posts each run's results to Slack; pure Python, no compiled deps
     "typer>=0.16",  # Command-line entry point
     "requests>=2.28",
 ]
@@ -45,7 +46,7 @@ dependencies = [
 desi-aap = "desi_aap.cli:app"
 
 [project.urls]
-"Source Code" = "https://github.com/CMU-MMA/desi_aap"
+"Source Code" = "https://github.com/CMU-MMA/desi-alert-augmentation-pipeline"
 
 # On a mac, install optional dependencies with `pip install '.[dev]'` (include the single quotes)
 [project.optional-dependencies]

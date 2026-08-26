@@ -1,0 +1,11 @@
+
+ipykernel
+ipython
+jupytext
+nbconvert
+myst-parser
+nbsphinx
+sphinx
+sphinx-autoapi
+sphinx-copybutton
+sphinx-book-theme

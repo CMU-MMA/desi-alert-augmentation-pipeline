@@ -1,6 +1,6 @@
 """On-disk store for GCN notices and their localization maps.
 
-Layout, rooted at STORE_ROOT:
+Layout, rooted at STORE_ROOT::
 
     <root>/<category>/<source>/<event_id>/
         notices/<stem>.json                     the notice, verbatim

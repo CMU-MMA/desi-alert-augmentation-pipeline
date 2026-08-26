@@ -676,8 +676,8 @@ def temporal_crossmatch_sesn_to_gw(
             Identify the matched event.
         days_from_gw
             Signed offset in days from the GW, negative when the SN was discovered first.
-        gw_*
-            The event's own fields copied across under a gw_ prefix: gw_far_per_year,
+        ``gw_*``
+            The event's own fields copied across under a ``gw_`` prefix: gw_far_per_year,
             gw_p_bns, gw_p_nsbh, gw_p_bbh, gw_p_terrestrial, gw_preferred_event,
             gw_pipeline, gw_search, gw_instruments, gw_skymap_file, gw_skymap_path and
             gw_status.

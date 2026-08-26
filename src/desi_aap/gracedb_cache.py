@@ -44,8 +44,8 @@ def safe_file_part(value):
     Returns
     -------
     str
-        The string with each run of characters outside [A-Za-z0-9_.-] replaced by a single
-        underscore.
+        The string with each run of characters outside ``[A-Za-z0-9_.-]`` replaced by a
+        single underscore.
     """
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value))
 

@@ -175,6 +175,19 @@ class GraceDbConfig(_Section):
         return GraceDbCache(cache_dir=cache_dir, recheck_window=self.recheck_window)
 
 
+class SlackConfig(_Section):
+    """The ``[slack]`` section: where each run's results are announced."""
+
+    # Path to a TOML file holding `bot_token = "xoxb-..."`. A path rather than the
+    # token itself, so the secret can live outside the repo and outside version
+    # control while config.toml stays committed.
+    credentials: Path
+    channel: str
+    # How many candidates the message lists before cutting off. At most 99:
+    # Slack's table block holds 100 rows, and the header takes one.
+    max_rows: int = Field(default=20, ge=1, le=99)
+
+
 class QueryConfig(_Section):
     """The ``[query]`` section: what that stage queries, and over what window."""
 
@@ -209,6 +222,10 @@ class PipelineConfig(_Section):
     localize: LocalizeConfig
     dask: DaskConfig = DaskConfig()
     gracedb: GraceDbConfig = GraceDbConfig()
+    # Optional, unlike the sections above: a fresh clone has no Slack app or
+    # credentials, and every stage still runs without them. The slack_publish
+    # stage skips itself, with a log line, when this section is absent.
+    slack: SlackConfig | None = None
 
     def dask_for(self, stage: str) -> dict[str, Any]:
         """Client arguments for one stage: the global ``[dask]``, then its own ``[<stage>.dask]``."""

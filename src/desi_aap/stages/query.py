@@ -77,7 +77,7 @@ def run_query(
 
     Parameters
     ----------
-    cfg : PipelineConfig
+    cfg : desi_aap.config.PipelineConfig
         The pipeline configuration.
     dry_run : bool
         Do the work but write nothing. The frame is still built and passed on,
