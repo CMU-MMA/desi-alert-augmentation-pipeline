@@ -54,6 +54,22 @@ ALERT_ID_COLUMN = "objectId"
 ALERT_RA_COLUMN = "candidate.ra"
 ALERT_DEC_COLUMN = "candidate.dec"
 ALERT_TIME_COLUMN = "candidate.jd"
+# Apparent PSF magnitude of the difference-image detection, and the band it was
+# measured in. A magnitude without its band is not a brightness anyone can act
+# on, so the two are projected and carried together.
+ALERT_MAG_COLUMN = "candidate.magpsf"
+ALERT_BAND_COLUMN = "candidate.band"
+
+# Every value ALERT_BAND_COLUMN can take: a lowercase single-letter string
+# rather than an integer filter id, because BOOM normalizes every survey it
+# ingests onto one set of names. Taken from the ``band`` field of the
+# ``LsstAlertToFilter`` record that GET /filters/schemas/LSST returns, where it
+# is an Avro enum unioned with null -- so a record may carry no band at all, and
+# an alert with none is one no absolute magnitude can be computed for.
+#
+# The first six are the LSST bands; j, h and k are in the enum because the same
+# type describes every survey BOOM ingests, and no LSST alert carries them.
+ALERT_BANDS = ("u", "g", "r", "i", "z", "y", "j", "h", "k")
 
 # Nested column names to use for known list-valued BOOM fields. Nested-pandas
 # uses ``"<nested>.<field>"`` to address sub-columns, so a nested column may not

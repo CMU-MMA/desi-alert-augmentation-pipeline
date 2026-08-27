@@ -10,15 +10,34 @@
 
 ## Pipeline
 
-`desi-aap` runs a sequence of stages, configured by TOML. Four stages exist
-today:
+`desi-aap` runs a sequence of stages, configured by TOML. It is not a straight
+line: the pipeline narrows to one point — the alerts, cross-matched against
+DESI and put at their hosts' distances — and then fans out into *filters*, each
+asking a different question of those same alerts.
+
+```
+query → crossmatch → distance ─┬→ localize ──┐
+                               │             ├→ slack_publish
+                               └→ …          ┘
+```
 
 | Stage | Does | Writes |
 |---|---|---|
 | `query` | Queries the [BOOM](https://api.kaboom.caltech.edu) broker for alerts in a time window (`desi_aap.boom`) | `query/alerts_<stamp>.parquet` |
 | `crossmatch` | Wraps those alerts in an LSDB catalog and cross-matches them against the DESI spectroscopic catalogs (`desi_aap.stages.crossmatch`), keeping the alerts that matched | `crossmatch/matches_<stamp>.parquet` |
-| `localize` | Scores those alerts against public LIGO/Virgo superevents (`desi_aap.stages.localize`), keeping the ones inside a 3D credible volume | `localize/coincidences_<stamp>.parquet` |
-| `slack_publish` | Posts the matched alerts to a Slack channel (`desi_aap.stages.slack_publish`). Skips itself unless a `[slack]` section is configured — see [Slack publishing](#slack-publishing) | nothing |
+| `distance` | Picks each alert's nearest DESI host and turns its redshift into a luminosity distance (`desi_aap.stages.distance`), dropping alerts with no usable host | `distance/distances_<stamp>.parquet` |
+| `localize` | **Filter.** Scores those alerts against public LIGO/Virgo superevents (`desi_aap.stages.localize`), keeping the ones inside a 3D credible volume | `localize/coincidences_<stamp>.parquet` |
+| `slack_publish` | Posts one message per filter that found something (`desi_aap.stages.slack_publish`). Skips itself unless a `[slack]` section is configured — see [Slack publishing](#slack-publishing) | nothing |
+
+Every filter is a cut on distance in some form — a GW credible *volume*, an
+absolute magnitude, a luminosity-distance limit — which is why `distance` is
+its own stage rather than something each filter works out for itself.
+
+Filters are siblings, so a stage that produces nothing **skips** what depends
+on it rather than ending the run. Most hours have no GW superevent within
+`window_days`, and a run where `localize` finds nothing must still let the
+other filters report. The filters are listed in `desi_aap.stages.filters`;
+adding one is an entry there and an entry in `desi_aap.pipeline.STAGES`.
 
 ### Install and run
 
@@ -44,6 +63,14 @@ one, since there would be nothing to match alerts against. Within `[localize]`,
 three settings have no default and must be written down, because they are what a
 result *means* — which events were considered (`se_types`), over what stretch of
 time (`window_days`), and how tightly (`credible_level`).
+
+Every *filter's* section takes `enabled`, which defaults to true. Switching one
+off is how one config runs the hourly search and another the nightly one; see
+[Running filters on different cadences](#running-filters-on-different-cadences).
+Only the filters take it — the stages they all depend on have nothing to gain
+from being switched off, and `slack_publish` is already silenced by leaving
+`[slack]` out. Writing `enabled` into any other section is a config error, not
+a silent no-op.
 
 `output_dir` and the GraceDB `cache_dir` are relative, so a fresh clone works
 anywhere with no setup. Both therefore follow the working directory: see
@@ -82,16 +109,21 @@ catalog = "/ocean/projects/phy250012p/shared/3DTS/DESI/dr2/desi_dr2_zcat"
 radius_arcsec = 5.0
 n_neighbors = 1
 
+[distance]
+# Defaulted. Omit the whole section to take this value.
+min_redshift = 0.0002
+
 [localize]
+# Defaulted: every filter is on unless a config says otherwise.
+enabled = true
 # Required: what search this is.
 se_types = ["BNS", "NSBH"]
 window_days = 14.0
 credible_level = 0.5
-# Defaulted: confidence gates and a numerical guard. Omit any of these.
+# Defaulted: confidence gates. Omit any of these.
 far_threshold_per_year = 2.0
 min_classification_prob_sum = 0.9
 require_2d_credible_level = false
-min_redshift = 0.0002
 
 [gracedb]
 cache_dir = "gracedb_cache"
@@ -127,18 +159,22 @@ BOOM returned 327 alerts.
 Dry run: not writing the alerts.
 Crossmatch summary: {'n_alerts': 327, 'n_matches_desi_dr1': 8, 'n_alerts_matched': 8}
 Dry run: not writing the matches.
+Distance summary: {'n_alerts': 8, 'n_alerts_with_host': 8, 'n_alerts_without_host': 0,
+ 'hosts_by_catalog': {'desi_dr1': 8}}
 8 of 8 matched alerts have a usable host redshift.
+Dry run: not writing the distances.
 GraceDB returned 15 BNS/NSBH superevent(s) with a false-alarm rate under 2 per year.
-Localization summary: {'n_alerts': 8, 'n_alerts_with_host': 8, 'n_superevents': 15,
+Localization summary: {'n_alerts': 8, 'n_alerts_placed': 8, 'n_superevents': 15,
  'n_temporal_pairs': 0, 'n_alerts_temporal': 0, 'n_spatial_rows': 0,
  'n_spatial_failed': 0, 'n_coincidences': 0, 'n_alerts_coincident': 0}
 Dry run: not writing the coincidences.
+No filter produced candidates; posting nothing.
 ```
 
 ### Output
 
 The pipeline writes intermediate results, per stage, in parquet. Each stage
-gets its own subdirectory of `run.output_dir`, and one run leaves four files:
+gets its own subdirectory of `run.output_dir`:
 
 ```
 /output/
@@ -146,19 +182,23 @@ gets its own subdirectory of `run.output_dir`, and one run leaves four files:
 │   └── alerts_20260807T182718Z.parquet        # every alert BOOM returned
 ├── crossmatch/
 │   └── matches_20260807T182718Z.parquet       # the alerts that matched a catalog
+├── distance/
+│   └── distances_20260807T182718Z.parquet     # those alerts, at their hosts' distances
 ├── localize/
 │   └── coincidences_20260807T182718Z.parquet  # the alerts inside a GW credible volume
 └── logs/
     └── 20260807T182718Z.log                   # what the run did
 ```
 
-One timestamp, taken when the run starts, names all four - so a run's files
+One timestamp, taken when the run starts, names all of them - so a run's files
 group together, and the log sits beside the results it describes.
 
-A stage that produces nothing ends the run, and writes no file. Most hours have
-no superevent within `window_days`, so `localize/` staying empty is the normal
-outcome rather than a sign that something went wrong; the log says which step
-the rows ran out at.
+A stage that produces nothing writes no file, and whatever depends on it is
+skipped rather than run. Because the filters are siblings, one of them finding
+nothing does not silence the others: an hour with no GW coincidence still lets
+every other filter report. Most hours have no superevent within `window_days`,
+so `localize/` staying empty is the normal outcome rather than a sign that
+something went wrong; the log names each stage it skipped and why.
 
 ### Scheduled runs
 
@@ -177,6 +217,48 @@ So `cd` in the crontab entry rather than relying on the environment:
                    desi-aap run -c config.toml >> cron.log 2>&1
 ```
 
+#### Running filters on different cadences
+
+Not every filter wants asking every hour. A GW coincidence is worth knowing
+about while the event is still fresh, so it runs on the hour; a superluminous
+supernova or a tidal disruption event evolves over weeks, so a nightly sweep is
+enough and an hourly one would just repeat itself.
+
+Cadence is a property of the schedule, not of the pipeline: give each cadence
+its own overlay, naming the window it looks back over and the filters it runs,
+and its own crontab entry. Nothing in the code needs to know how often it is
+called, and the lookback and the cadence stay consistent because they are
+written down together.
+
+```toml
+# hourly.toml — the fast search, for things that decay.
+[query.window]
+lookback = "1h"
+
+[localize]
+enabled = true
+```
+
+```toml
+# nightly.toml — the slow sweep, over the whole day's alerts.
+[query.window]
+lookback = "1d"
+
+[localize]
+enabled = false   # the hourly run already covered these
+```
+
+```cron
+0 * * * *   cd /path/to/desi-alert-augmentation-pipeline && \
+            desi-aap run -c config.toml -c hourly.toml  >> cron.log 2>&1
+0 14 * * *  cd /path/to/desi-alert-augmentation-pipeline && \
+            desi-aap run -c config.toml -c nightly.toml >> cron.log 2>&1
+```
+
+A disabled filter is skipped, and the stages it would have depended on still
+run — so the nightly sweep pays for one `query` and one `crossmatch` and hands
+the same placed alerts to whichever filters it does want.
+
 If you would rather not depend on that, give absolute paths in an overlay:
 
 ```toml
@@ -190,12 +272,26 @@ cache_dir = "/ocean/projects/phy250012p/shared/3DTS/gracedb_cache"
 
 ### Slack publishing
 
-The `slack_publish` stage posts each run's candidates to a channel: a header
-naming the run, how many candidates it found, the first `max_rows` of them
-with their coordinates and per-catalog match counts, and the path to the
-full parquet output. The
-pipeline stops before this stage when an earlier one produces no rows, so a
-run with nothing to report posts nothing.
+The `slack_publish` stage posts **one message per filter** that found
+something: a header naming the run and what that filter found, the first
+`max_rows` candidates, and the path to the full parquet output.
+
+Every message shows what identifies an alert and where to point a telescope —
+`objectId`, its coordinates, and `candidate.magpsf` with the `candidate.band`
+it was measured in, since a magnitude without its band is not a brightness
+anyone can act on. After those come whichever columns the filter itself
+considers worth reading, from the `SLACK_DISPLAY` its module declares.
+
+One message per filter rather than one per run because the filters answer
+different questions and are read by different people — a GW coincidence wants
+looking at tonight, a superluminous supernova candidate can wait for the
+morning. Each filter says how its own candidates are announced, through the
+`SLACK_DISPLAY` its module declares, so `slack_publish` never learns what any
+particular filter means.
+
+A filter that found nothing is passed over in silence rather than posting an
+empty message, and a run where every filter found nothing posts nothing at all.
+That is the normal outcome for most hours.
 
 The `[slack]` section is optional — without it the stage logs that it is
 skipping, so a fresh clone runs with no Slack setup. To turn it on:
@@ -230,12 +326,48 @@ tile it bigger):
 ```bash
 # Preview the message this file would produce, without posting:
 desi-aap run -c config.toml --from-stage slack_publish \
-             --input output/crossmatch/matches_<stamp>.parquet --dry-run
+             --input output/localize/coincidences_<stamp>.parquet --dry-run
 
 # Post it for real, once [slack] is configured:
 desi-aap run -c config.toml --from-stage slack_publish \
-             --input output/crossmatch/matches_<stamp>.parquet
+             --input output/localize/coincidences_<stamp>.parquet
 ```
+
+`--input` stands in for whatever the starting stage consumes, which the stage
+itself declares. `slack_publish` consumes every filter, and one file cannot be
+several, so it is offered to each of them — which makes this a preview of the
+formatting rather than a faithful replay of a run.
+
+## The distance stage
+
+An alert carries no redshift of its own. What it carries, after `crossmatch`,
+is one or more DESI sources sitting close to it on the sky — and those do have
+redshifts. `desi_aap.stages.distance` picks one of them per alert and turns its
+redshift into a luminosity distance.
+
+The host is chosen by pooling the matches from every `[crossmatch.catalogs.*]`
+table and keeping the **nearest** one with `ZWARN == 0` and a redshift at or
+above `min_redshift`. Which catalog that turns out to be is decided by the
+association, not by config order, and is recorded per row in `host_catalog`.
+Two hosts at the same separation — the same object in two releases — resolve
+the same way on every run. Every catalog is read for a redshift, so one that
+carries no `Z` column raises rather than being skipped.
+
+An alert with no such host is **dropped here**: with no redshift there is no
+distance, and no filter downstream could say anything about it. The count is in
+the stage's summary, so a run that loses most of its alerts that way says so.
+
+It is its own stage, rather than something each filter works out for itself,
+because every filter is a cut on distance in some form — a GW credible
+*volume*, an absolute magnitude, a luminosity-distance limit. Choosing the host
+inside one filter would mean the others either repeated the work or disagreed
+with it.
+
+Each row gains `host_catalog`, `host_redshift`, `host_sep_arcsec`, and one
+`dist_mpc_<label>` per entry in `desi_aap.cosmology.COSMOLOGIES` — every
+cosmology rather than one chosen here, because the choice belongs to whoever is
+cutting on the number. Two columns of the same redshift are cheap; a distance
+silently computed under the wrong cosmology is not.
 
 ## The localize stage
 
@@ -249,35 +381,31 @@ unchanged and keeps working.
 `desi_aap.stages.localize` is the pipeline's caller of the same functions. What
 it adds is the adaptation, since alerts are not TNS rows:
 
-- **Distance.** An alert carries no redshift. It takes one from the DESI host
-  the crossmatch stage attached to it: pooling the matches from every
-  `[crossmatch.catalogs.*]` table and keeping the **nearest** host with
-  `ZWARN == 0` and a redshift at or above `min_redshift`. Which catalog that
-  turns out to be is decided by the association, not by config order, and is
-  recorded per row in `host_catalog`. An alert with no such host is dropped —
-  there is no distance to put it at.
+- **Distance.** An alert carries no redshift, so the `distance` stage has
+  already put one on the row before this filter runs — see
+  [The distance stage](#the-distance-stage). This filter renames those columns
+  into the vocabulary `gracedb_tools` reads and measures nothing itself.
 - **Time.** `candidate.jd`, read as a UTC Julian date, stands in for
   `discoverydate`. It is a detection rather than a discovery, so an object
   detected repeatedly is offered to the temporal window once per alert.
 
-Every catalog in `[crossmatch.catalogs.*]` is read for a redshift, so one that
-carries no `Z` column raises rather than being skipped.
-
 ### What it writes
 
 One row per alert, keeping the shape the crossmatch stage established: the
-alert's own columns, its DESI matches in their nested columns, and the GW
-results in a new nested `gw_matches` column — one entry per (superevent,
-cosmology), since each cosmology puts the same alert at a different luminosity
-distance. The row also gains `host_catalog`, `host_redshift`,
-`host_sep_arcsec` and one `dist_mpc_<label>` per cosmology.
+alert's own columns, its DESI matches in their nested columns, the host and
+distance columns the `distance` stage added, and the GW results in a new nested
+`gw_matches` column — one entry per (superevent, cosmology), since each
+cosmology puts the same alert at a different luminosity distance. The row also
+gains `superevent_ids`, the events it matched, comma-separated: the same
+identifiers as in `gw_matches`, flattened so that "which event is this?" can be
+read off the row without unnesting.
 
 Only the alerts that landed inside the `credible_level` volume are written, the
 way `crossmatch` writes only the alerts that matched. The temporal matches and
 near misses behind them are counted in the summary and logged, not persisted:
 
 ```
-Localization summary: {'n_alerts': 8, 'n_alerts_with_host': 8, 'n_superevents': 15,
+Localization summary: {'n_alerts': 8, 'n_alerts_placed': 8, 'n_superevents': 15,
  'n_temporal_pairs': 8, 'n_alerts_temporal': 8, 'n_spatial_rows': 16,
  'n_spatial_failed': 0, 'n_coincidences': 0, 'n_alerts_coincident': 0}
 ```

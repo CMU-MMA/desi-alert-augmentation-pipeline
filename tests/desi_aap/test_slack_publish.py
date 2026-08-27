@@ -5,11 +5,13 @@ import logging
 import pytest
 from slack_sdk.errors import SlackApiError
 
-from desi_aap.config import PipelineConfig, SlackConfig
+from desi_aap import pipeline
+from desi_aap.config import PipelineConfig
 from desi_aap.stages import slack_publish
 from desi_aap.stages.base import StageResult
-from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
 from desi_aap.stages.crossmatch import run_crossmatch
+from desi_aap.stages.localize import SLACK_DISPLAY as LOCALIZE_DISPLAY
+from desi_aap.stages.localize import STAGE as LOCALIZE_STAGE
 from desi_aap.stages.slack_publish import (
     STAGE,
     format_message,
@@ -22,53 +24,30 @@ STAMP = "20260807T120000Z"
 
 
 @pytest.fixture
-def slack_credentials(tmp_path):
-    """A credentials file holding a fake bot token."""
-    path = tmp_path / "slack.toml"
-    path.write_text('bot_token = "xoxb-test-token"\n')
-    return path
-
-
-@pytest.fixture
-def slack_config(pipeline_config, slack_credentials):
-    """The shared config, with a [slack] section pointing at the fake credentials."""
-    section = SlackConfig(credentials=slack_credentials, channel="#desi-alerts", max_rows=5)
-    return pipeline_config.model_copy(update={"slack": section})
-
-
-@pytest.fixture
 def matches(pipeline_config, gold_standard_alerts):
-    """A real crossmatch result to publish, nested match column and all."""
+    """A real frame to publish, nested match column and all.
+
+    A crossmatch result rather than a filter's own output: what this stage does
+    with a frame does not depend on which filter produced it, and building one
+    without reaching GraceDB keeps the formatting tests independent of the GW
+    machinery. It is labelled as the filter's below, which is all this stage
+    reads.
+    """
     inputs = {"query": StageResult(stage="query", frame=gold_standard_alerts)}
-    return run_crossmatch(pipeline_config, dry_run=True, inputs=inputs, stamp=STAMP)
+    result = run_crossmatch(pipeline_config, dry_run=True, inputs=inputs, stamp=STAMP)
+    return StageResult(stage=LOCALIZE_STAGE, frame=result.frame, stamp=result.stamp)
 
 
 @pytest.fixture
 def match_inputs(matches):
-    """What the crossmatch stage would have handed this one."""
-    return {CROSSMATCH_STAGE: matches}
-
-
-@pytest.fixture
-def posted(monkeypatch):
-    """Capture what would have gone to Slack instead of calling the Web API."""
-    calls = []
-
-    class FakeWebClient:
-        def __init__(self, token):
-            self.token = token
-
-        def chat_postMessage(self, **kwargs):  # noqa: N802 -- the slack_sdk method name
-            calls.append({"token": self.token, **kwargs})
-
-    monkeypatch.setattr(slack_publish, "WebClient", FakeWebClient)
-    return calls
+    """What the localize filter would have handed this one."""
+    return {LOCALIZE_STAGE: matches}
 
 
 def test_run_posts_the_matches(slack_config, match_inputs, posted):
     result = run_slack_publish(slack_config, inputs=match_inputs, stamp=STAMP)
 
-    assert result.summary["posted"] is True
+    assert result.summary["n_posted"] == 1
     (call,) = posted
     assert call["token"] == "xoxb-test-token"
     assert call["channel"] == "#desi-alerts"
@@ -77,25 +56,40 @@ def test_run_posts_the_matches(slack_config, match_inputs, posted):
 
 
 def test_the_message_lists_rows_and_cuts_off(matches):
-    message = format_message(matches, max_rows=5)
+    message = format_message(matches, LOCALIZE_DISPLAY, max_rows=5)
 
     section, table = message["blocks"][:2]
-    assert "8 candidates found. Showing the first 5:" in section["text"]["text"]
+    assert "8 GW coincidence candidates found. Showing the first 5:" in section["text"]["text"]
     # One row per shown alert, plus the header row.
     rows = table["rows"]
     assert len(rows) == 6
-    assert [cell["text"] for cell in rows[0]] == ["objectId", "candidate.ra", "candidate.dec", "desi_dr1"]
+    assert [cell["text"] for cell in rows[0]] == [
+        "objectId",
+        "candidate.ra",
+        "candidate.dec",
+        "candidate.magpsf",
+        "candidate.band",
+        "desi_dr1",
+    ]
     # Every cell is raw_text -- Slack rejects its documented raw_number shape --
-    # with measures right-aligned per column instead.
+    # with measures right-aligned per column instead. The band is a letter, so
+    # it stays left like the identifier rather than right like the magnitude.
     assert all(cell["type"] == "raw_text" for row in rows for cell in row)
-    assert [setting["align"] for setting in table["column_settings"]] == ["left", "right", "right", "right"]
+    assert [setting["align"] for setting in table["column_settings"]] == [
+        "left",
+        "right",
+        "right",
+        "right",
+        "left",
+        "right",
+    ]
 
 
 def test_a_short_message_has_no_cutoff_line(matches):
-    message = format_message(matches, max_rows=20)
+    message = format_message(matches, LOCALIZE_DISPLAY, max_rows=20)
 
     section, table = message["blocks"][:2]
-    assert "8 candidates found:" in section["text"]["text"]
+    assert "8 GW coincidence candidates found:" in section["text"]["text"]
     assert "Showing the first" not in section["text"]["text"]
     assert len(table["rows"]) == 9
 
@@ -110,11 +104,11 @@ def test_the_message_names_the_output_file(matches, tmp_path):
         summary=matches.summary,
     )
 
-    context = format_message(with_path, max_rows=5)["blocks"][-1]
+    context = format_message(with_path, LOCALIZE_DISPLAY, max_rows=5)["blocks"][-1]
     assert context["type"] == "context"
     assert f"Full results: `{written}`" in context["elements"][0]["text"]
     # The dry-run result wrote nothing, so there is no path to point at.
-    blocks = format_message(matches, max_rows=5)["blocks"]
+    blocks = format_message(matches, LOCALIZE_DISPLAY, max_rows=5)["blocks"]
     assert all(block["type"] != "context" for block in blocks)
 
 
@@ -123,10 +117,10 @@ def test_no_slack_section_skips(pipeline_config, match_inputs, posted, caplog):
         result = run_slack_publish(pipeline_config, inputs=match_inputs, stamp=STAMP)
 
     assert posted == []
-    assert result.summary["posted"] is False
+    assert result.summary["n_posted"] == 0
     assert "skipping" in caplog.text
-    # The frame passes through, so this stage never reads as the one that ended the run.
-    assert not result.is_empty
+    # It still reports what each filter would have contributed.
+    assert result.summary["rows_by_filter"] == {LOCALIZE_STAGE: 8}
 
 
 def test_dry_run_logs_the_message_without_posting(slack_config, match_inputs, posted, caplog):
@@ -134,21 +128,55 @@ def test_dry_run_logs_the_message_without_posting(slack_config, match_inputs, po
         result = run_slack_publish(slack_config, dry_run=True, inputs=match_inputs, stamp=STAMP)
 
     assert posted == []
-    assert result.summary["posted"] is False
-    assert "8 candidates found" in caplog.text
+    assert result.summary["n_posted"] == 0
+    assert "8 GW coincidence candidates found" in caplog.text
 
 
-def test_an_empty_upstream_posts_nothing(slack_config, posted):
-    empty = {CROSSMATCH_STAGE: StageResult(stage=CROSSMATCH_STAGE, frame=None)}
+def test_an_empty_filter_posts_nothing(slack_config, posted):
+    empty = {LOCALIZE_STAGE: StageResult(stage=LOCALIZE_STAGE, frame=None)}
     result = run_slack_publish(slack_config, inputs=empty, stamp=STAMP)
 
     assert posted == []
-    assert result.summary == {"posted": False, "n_rows": 0}
+    # The filter ran and found nothing, which is not the same as not running:
+    # it is present with a count of zero.
+    assert result.summary["n_posted"] == 0
+    assert result.summary["rows_by_filter"] == {LOCALIZE_STAGE: 0}
 
 
-def test_a_missing_upstream_names_the_stage_that_must_run_first(slack_config):
-    with pytest.raises(KeyError, match=CROSSMATCH_STAGE):
-        run_slack_publish(slack_config, inputs=None, stamp=STAMP)
+def test_a_filter_that_did_not_run_is_passed_over(slack_config, posted):
+    """Verify a skipped or switched-off filter is silence, not an error.
+
+    Unlike the data stages, a missing filter is normal here: the pipeline skips
+    one whose input was empty, and switching one off is how a nightly run avoids
+    repeating the hourly one's work.
+    """
+    result = run_slack_publish(slack_config, inputs={}, stamp=STAMP)
+
+    assert posted == []
+    # Absent entirely, rather than present with a zero: it never ran.
+    assert result.summary["rows_by_filter"] == {}
+
+
+def test_one_rejected_message_does_not_withhold_the_others(slack_config, match_inputs, monkeypatch):
+    """Verify a Slack rejection is loud but does not silence the filters that could post.
+
+    The filters are independent, so a rate limit hit while announcing one is no
+    reason to withhold another -- but a partial post must not report as success
+    either, so the failures are raised together once the postable ones are out.
+    """
+    attempted = []
+
+    def flaky(token, channel, text, blocks=None):
+        attempted.append(text)
+        raise RuntimeError("Slack rejected the message: ratelimited.")
+
+    monkeypatch.setattr(slack_publish, "post_message", flaky)
+
+    with pytest.raises(RuntimeError, match=r"Posted 0 of 1 filter message\(s\).*ratelimited"):
+        run_slack_publish(slack_config, inputs=match_inputs, stamp=STAMP)
+
+    # It got as far as trying, rather than bailing out before the attempt.
+    assert len(attempted) == 1
 
 
 def test_a_missing_credentials_file_says_how_to_make_one(tmp_path):
@@ -210,19 +238,25 @@ def test_max_rows_must_be_positive(slack_credentials):
         )
 
 
-# TODO(#XX): localize now runs before this stage and is empty on most runs, so
-# run_pipeline's stop-on-empty ends the run before slack_publish is reached. The
-# assertion below is left as written -- it is the invariant we still want -- so
-# strict xfail reports XPASS the moment the stage order is settled.
-@pytest.mark.xfail(
-    reason="#XX: localize precedes slack_publish and stops the run when it finds no coincidence",
-    strict=True,
-)
-def test_the_stage_runs_last(slack_config, stub_boom, posted):
-    from desi_aap import pipeline
+def test_the_stage_runs_last_and_a_quiet_run_reaches_it(slack_config, stub_boom, stub_gracedb, posted):
+    """Verify the run gets all the way here rather than ending at an empty filter.
+
+    This is what the fan-out bought. Under the old stop-on-empty pipeline,
+    localize ran before this stage and was empty on most runs, so the run ended
+    early and never reached slack_publish at all. Now every stage is accounted
+    for, and this one is still last.
+
+    With one filter configured, every filter being empty does leave nothing to
+    announce, so the stage is skipped rather than run -- but it is *reached*,
+    which is the part that used to be untrue, and the skip is recorded rather
+    than being the silent end of the run.
+    """
+    stub_gracedb.searched_prob_vol = 0.99  # nothing lands inside the credible volume
 
     results = pipeline.run_pipeline(slack_config, stamp=STAMP)
 
     assert list(results)[-1] == STAGE
-    (call,) = posted
-    assert "8 candidates found" in call["text"]
+    assert set(results) == set(pipeline.STAGE_ORDER)
+    assert results[LOCALIZE_STAGE].is_empty
+    assert results[STAGE].summary["skipped"] == "no input"
+    assert posted == []

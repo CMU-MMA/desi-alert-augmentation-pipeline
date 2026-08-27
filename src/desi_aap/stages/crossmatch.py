@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 STAGE = "crossmatch"
 
+# Stages whose output this one consumes. Declared beside the stage rather
+# than in the pipeline registry so that what the stage reads and what the
+# pipeline thinks it reads cannot drift apart: input_result is called with
+# these names, and desi_aap.pipeline.STAGES takes its `requires` from here.
+REQUIRES: tuple[str, ...] = (QUERY_STAGE,)
+
 # Prefix of the parquet file this stage writes.
 OUTPUT_PREFIX = "matches"
 
@@ -325,7 +331,8 @@ def run_crossmatch(
     stage_dir = cfg.run.stage_dir(STAGE)
 
     stamp = stamp or run_stamp()
-    alerts = input_result(inputs, QUERY_STAGE).frame
+    (upstream,) = REQUIRES
+    alerts = input_result(inputs, upstream).frame
 
     if alerts is None or alerts.empty:
         logger.info("No alerts to cross-match; writing nothing.")

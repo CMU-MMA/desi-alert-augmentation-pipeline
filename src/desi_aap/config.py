@@ -81,7 +81,31 @@ class CrossmatchCatalogConfig(_Section):
     n_neighbors: int = Field(ge=1)
 
 
-class LocalizeConfig(_Section):
+class DistanceConfig(_Section):
+    """The ``[distance]`` section: how each alert's host redshift is chosen."""
+
+    # Smallest host redshift treated as a real measurement. Below this there is no usable
+    # luminosity distance: a z of 0 puts the alert at the origin, and a small negative one
+    # makes the coordinate conversion raise.
+    min_redshift: float = Field(default=0.0002, gt=0)
+
+
+class _FilterSection(_Section):
+    """Base for a filter's section: everything a filter has in common.
+
+    A filter selects candidates from the placed alerts and has its results
+    announced; see :mod:`desi_aap.stages.filters`. What they share is the switch
+    below, which is how one config runs the hourly search and another the
+    nightly one without either having to know what the other turns off.
+    """
+
+    # On by default, so a config that names a filter's settings at all gets that
+    # filter. Turning one off is the deliberate act, and it is written down in the
+    # overlay that does it.
+    enabled: bool = True
+
+
+class LocalizeConfig(_FilterSection):
     """The ``[localize]`` section: which superevents to score alerts against, and how."""
 
     # Required, because these three are what a result means: which events were
@@ -103,7 +127,6 @@ class LocalizeConfig(_Section):
     # TODO: check whether False is the right value here (inherited from notebook, but let's
     # explicitly confirm)
     require_2d_credible_level: bool = False
-    min_redshift: float = Field(default=0.0002, gt=0)
 
     @model_validator(mode="after")
     def _check_se_types(self) -> "LocalizeConfig":
@@ -219,6 +242,10 @@ class PipelineConfig(_Section):
     run: RunConfig
     query: QueryConfig
     crossmatch: CrossmatchConfig = CrossmatchConfig()
+    # Defaulted, unlike [localize]: this section only tunes how a host is chosen, and
+    # its one setting is a guard on the arithmetic rather than a statement of what the
+    # search was. A config that says nothing about it still gets usable distances.
+    distance: DistanceConfig = DistanceConfig()
     localize: LocalizeConfig
     dask: DaskConfig = DaskConfig()
     gracedb: GraceDbConfig = GraceDbConfig()
