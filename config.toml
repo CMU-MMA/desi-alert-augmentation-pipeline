@@ -46,12 +46,35 @@ radius_arcsec = 5.0
 n_neighbors = 1
 
 # ===========================================================================
-# Stage: localize -- score the matched alerts against GW event localizations.
-# Each alert takes its distance from the nearest DESI host matched above, and
-# is kept if it lands inside a superevent's 3D credible volume.
+# Stage: distance -- put each matched alert at a distance, using the nearest
+# DESI host the crossmatch attached to it. Every filter below is a cut on that
+# distance in some form, so it is chosen once, here, before any of them run.
+# An alert with no usable host has no distance and leaves the run at this point.
 # ===========================================================================
 
+[distance]
+# Smallest host redshift treated as a real measurement. Below this there is no
+# usable luminosity distance: a z of 0 puts the alert at the origin, and a
+# small negative one makes the coordinate conversion raise.
+min_redshift = 0.0002
+
+# ===========================================================================
+# Filters. Each reads the placed alerts above and keeps the ones interesting
+# for one reason; each has its own Slack message. They are siblings, so one
+# finding nothing does not stop the others.
+#
+# `enabled` is how one config runs the hourly search and another the nightly
+# one -- see "Scheduled runs" in the README. Every filter is on unless a
+# config says otherwise.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Filter: localize -- alerts consistent with a GW event localization. Kept if
+# the alert lands inside a superevent's 3D credible volume.
+# ---------------------------------------------------------------------------
+
 [localize]
+enabled = true
 # --- Required: what search this is. No defaults, because these three are what a
 # result means, and only credible_level is recorded in the stage's output.
 
@@ -81,16 +104,12 @@ min_classification_prob_sum = 0.9
 # 3D coincidences -- an alert whose sky position is unremarkable but whose
 # distance lands on a high-density slice of the distance posterior.
 require_2d_credible_level = false
-# Smallest host redshift treated as a real measurement. Below this there is no
-# usable luminosity distance: a z of 0 puts the alert at the origin, and a
-# small negative one makes the coordinate conversion raise.
-min_redshift = 0.0002
 
 # ===========================================================================
-# Stage: slack_publish -- post the run's matched alerts to a Slack channel.
-# Optional: without this section the stage skips itself, so a fresh clone
-# runs with no Slack app. The pipeline stops before this stage when an
-# earlier one produces no rows, so an empty run posts nothing.
+# Stage: slack_publish -- post each filter's candidates to a Slack channel,
+# one message per filter. Optional: without this section the stage skips
+# itself, so a fresh clone runs with no Slack app. A filter that found nothing
+# is passed over, and a run where every filter found nothing posts nothing.
 # ===========================================================================
 
 # [slack]

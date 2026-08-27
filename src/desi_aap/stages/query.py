@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 STAGE = "query"
 
+# Stages whose output this one consumes; the pipeline reads it to decide
+# whether there is anything for this stage to do. Empty: the alerts come
+# from the broker rather than from another stage.
+REQUIRES: tuple[str, ...] = ()
+
 # Prefix of the parquet file this stage writes.
 OUTPUT_PREFIX = "alerts"
 

@@ -6,11 +6,12 @@ import nested_pandas as npd
 import numpy as np
 import pandas as pd
 import pytest
+from astropy.time import Time
 
 from desi_aap import boom, gracedb_tools
-from desi_aap.config import PipelineConfig
+from desi_aap.config import PipelineConfig, SlackConfig
 from desi_aap.gracedb_cache import GraceDbCache
-from desi_aap.stages import localize
+from desi_aap.stages import localize, slack_publish
 
 TEST_DIR = Path(__file__).parent
 DATA_DIR_NAME = "data"
@@ -18,9 +19,97 @@ DESI_DR1_COSMOS_PATH = "desi_dr1_cosmos"
 MOCK_DESI_DR2_COSMOS_PATH = "mock_desi_dr2"
 GOLD_STANDARD_ALERTS_PATH = "gold_standard_alerts.parquet"
 
-# GW190425: t_0 in GPS seconds, and the UTC merger time it converts to.
+# GW190425: t_0 in GPS seconds, the UTC merger time it converts to, and the UTC
+# Julian date an alert detected at that instant carries. The three are written
+# out rather than converted from each other, since those conversions are
+# themselves under test.
 GW190425_GPS = 1240215503.017147
 GW190425_UTC = pd.Timestamp("2019-04-25 08:18:05.017147", tz="UTC")
+GW190425_JD = 2458598.845891402
+
+# The redshift floor `pipeline_config` uses, and a host redshift comfortably
+# above it that puts an alert inside a plausible GW horizon.
+TEST_MIN_REDSHIFT = 0.0002
+NEARBY_HOST_Z = 0.03
+
+
+def host(z=NEARBY_HOST_Z, zwarn=0, sep=1.0):
+    """One nested host row, in the fields the distance stage reads."""
+    return {"Z": z, "ZWARN": zwarn, "_dist_arcsec": sep}
+
+
+def make_matches(hosts_by_catalog, *, jd=GW190425_JD, ra=240.0, dec=-20.0, n_alerts=None):
+    """Build a crossmatch-stage frame: alerts with one nested column per catalog.
+
+    Here rather than in one test module because it describes the input to the
+    distance stage, which both that stage's tests and the filter tests
+    downstream of it need to build.
+
+    Parameters
+    ----------
+    hosts_by_catalog : dict
+        Maps a catalog name to a list, one entry per alert, of the host rows that
+        catalog matched to it. Each host row is a dict of nested field to value,
+        as :func:`host` returns.
+    jd, ra, dec : float or sequence
+        The alerts' own columns, broadcast when scalar.
+    n_alerts : int, optional
+        Number of alerts, inferred from the first catalog's list otherwise.
+
+    Returns
+    -------
+    nested_pandas.NestedFrame
+        One row per alert, indexed from zero.
+    """
+    if n_alerts is None:
+        n_alerts = len(next(iter(hosts_by_catalog.values())))
+    frame = npd.NestedFrame(
+        {
+            "objectId": [f"LSST{i:03d}" for i in range(n_alerts)],
+            "candidate.ra": np.broadcast_to(np.asarray(ra, dtype=float), (n_alerts,)).copy(),
+            "candidate.dec": np.broadcast_to(np.asarray(dec, dtype=float), (n_alerts,)).copy(),
+            "candidate.jd": np.broadcast_to(np.asarray(jd, dtype=float), (n_alerts,)).copy(),
+        },
+        index=range(n_alerts),
+    )
+    for name, per_alert in hosts_by_catalog.items():
+        flat = pd.DataFrame(
+            [host_row for hosts in per_alert for host_row in hosts],
+            index=[i for i, hosts in enumerate(per_alert) for _ in hosts],
+        )
+        frame = frame.join_nested(flat, name, how="left")
+    return frame
+
+
+def make_placed(hosts_by_catalog, *, catalog_names=None, **kwargs):
+    """Build a distance-stage frame: alerts already put at their hosts' distances.
+
+    Runs the real distance stage over :func:`make_matches` rather than
+    hand-writing the placed shape, so that a change to what that stage produces
+    reaches the filter tests instead of leaving them asserting against a shape
+    nothing produces any more.
+
+    Parameters
+    ----------
+    hosts_by_catalog : dict
+        As :func:`make_matches` takes it.
+    catalog_names : sequence of str, optional
+        Catalogs to take hosts from. Defaults to every key of
+        ``hosts_by_catalog``.
+    **kwargs
+        Passed to :func:`make_matches`.
+
+    Returns
+    -------
+    nested_pandas.NestedFrame
+        One row per alert with a usable host, carrying the host and distance
+        columns every filter reads.
+    """
+    from desi_aap.stages.distance import attach_distances, nearest_hosts
+
+    matches = make_matches(hosts_by_catalog, **kwargs)
+    names = list(hosts_by_catalog) if catalog_names is None else list(catalog_names)
+    return attach_distances(matches, nearest_hosts(matches, names, min_redshift=TEST_MIN_REDSHIFT))
 
 
 @pytest.fixture
@@ -71,9 +160,9 @@ def gold_standard_alerts(test_data_dir):
 def pipeline_config(tmp_path, desi_dr1_cosmos_dir):
     """A config wired to the COSMOS test catalog and a temp output directory.
 
-    Spells out every [localize] setting rather than leaning on the defaults, so
-    that a change to one of those defaults shows up as a test failure here
-    rather than silently moving what the suite exercises.
+    Spells out every [distance] and [localize] setting rather than leaning on
+    the defaults, so that a change to one of those defaults shows up as a test
+    failure here rather than silently moving what the suite exercises.
     """
     return PipelineConfig.model_validate(
         {
@@ -88,14 +177,15 @@ def pipeline_config(tmp_path, desi_dr1_cosmos_dir):
                     }
                 }
             },
+            "distance": {"min_redshift": 0.0002},
             "localize": {
+                "enabled": True,
                 "se_types": ["BNS", "NSBH"],
                 "far_threshold_per_year": 2.0,
                 "min_classification_prob_sum": 0.9,
                 "window_days": 14.0,
                 "credible_level": 0.5,
                 "require_2d_credible_level": False,
-                "min_redshift": 0.0002,
             },
         }
     )
@@ -206,3 +296,65 @@ def stub_boom_no_alerts(monkeypatch):
     frame = npd.NestedFrame({"objectId": [], "candidate.ra": [], "candidate.dec": []})
     monkeypatch.setattr(boom, "query_alerts", lambda **kwargs: frame)
     return frame
+
+
+@pytest.fixture
+def superevent_during_alerts(stub_gracedb, gold_standard_alerts):
+    """Move the stubbed superevent into the alert snapshot's own time window.
+
+    The committed alerts and the GW190425 superevent the other fixtures use are
+    seven years apart, so the temporal cut rejects every pair and no run built
+    on them can reach a coincidence. That is the right default -- most hours
+    really do have no superevent -- but it means the happy path cannot be
+    exercised without moving one of the two together.
+
+    The superevent moves rather than the alerts, since the alerts are a real
+    snapshot that `test_gold_standard` diffs against the live broker.
+
+    Returns
+    -------
+    pandas.Timestamp
+        The superevent's new time: the midpoint of the alerts' own range, so
+        every alert in the snapshot falls inside a `window_days` of it.
+    """
+    from desi_aap.stages.localize import julian_dates_to_utc
+
+    times = julian_dates_to_utc(gold_standard_alerts[boom.ALERT_TIME_COLUMN])
+    midpoint = times.min() + (times.max() - times.min()) / 2
+    stub_gracedb.events.loc[0, "gw_time"] = midpoint
+    # Kept consistent with gw_time even though the stubbed spatial crossmatch
+    # never reads it: it is carried through to the results, where a GPS time
+    # from a different decade than the UTC beside it would be a puzzle.
+    stub_gracedb.events.loc[0, "gps_time"] = Time(midpoint).gps
+    return midpoint
+
+
+@pytest.fixture
+def slack_credentials(tmp_path):
+    """A credentials file holding a fake bot token."""
+    path = tmp_path / "slack.toml"
+    path.write_text('bot_token = "xoxb-test-token"\n')
+    return path
+
+
+@pytest.fixture
+def slack_config(pipeline_config, slack_credentials):
+    """The shared config, with a [slack] section pointing at the fake credentials."""
+    section = SlackConfig(credentials=slack_credentials, channel="#desi-alerts", max_rows=5)
+    return pipeline_config.model_copy(update={"slack": section})
+
+
+@pytest.fixture
+def posted(monkeypatch):
+    """Capture what would have gone to Slack instead of calling the Web API."""
+    calls = []
+
+    class FakeWebClient:
+        def __init__(self, token):
+            self.token = token
+
+        def chat_postMessage(self, **kwargs):  # noqa: N802 -- the slack_sdk method name
+            calls.append({"token": self.token, **kwargs})
+
+    monkeypatch.setattr(slack_publish, "WebClient", FakeWebClient)
+    return calls

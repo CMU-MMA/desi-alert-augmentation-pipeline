@@ -9,7 +9,7 @@ import typer
 
 from desi_aap.config import ConfigError, load_config
 from desi_aap.log import run_log_path, setup_logging
-from desi_aap.pipeline import STAGE_ORDER, run_pipeline
+from desi_aap.pipeline import STAGE_ORDER, STAGE_SPECS, run_pipeline
 from desi_aap.stages.base import StageInputs, StageResult
 from desi_aap.utils import run_stamp
 
@@ -92,12 +92,15 @@ def run(
     try:
         inputs: StageInputs | None = None
         if from_stage is not None:
-            # The file stands in for the output of the stage just before the
-            # one we start at, which is what that stage consumes.
-            previous = STAGE_ORDER[STAGE_ORDER.index(from_stage) - 1]
+            # The file stands in for what the starting stage consumes, which the
+            # stage itself declares -- not simply whatever precedes it in the
+            # listing, since the filters are siblings rather than a chain. A
+            # stage consuming several (slack_publish, which reads every filter)
+            # gets the file as all of them, one file being all --input offers.
             frame = npd.read_parquet(input_path)
             inputs = {
-                previous: StageResult(stage=previous, frame=frame, output_path=input_path, stamp=timestamp)
+                producer: StageResult(stage=producer, frame=frame, output_path=input_path, stamp=timestamp)
+                for producer in STAGE_SPECS[from_stage].requires
             }
         run_pipeline(cfg, dry_run=dry_run, stamp=timestamp, start=from_stage, inputs=inputs)
     except Exception:

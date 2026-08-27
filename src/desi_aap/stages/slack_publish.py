@@ -1,10 +1,21 @@
-"""Post each run's matched alerts to a Slack channel.
+"""Post each filter's candidates to a Slack channel, one message per filter.
 
-The stage takes the frame the previous stage produced, renders it as a short
-message -- a header naming the run, how many candidates it found, the first
-``[slack].max_rows`` of them as a native Block Kit table, and a pointer to
-the full parquet output -- and posts it with the Slack Web API's
+Each filter in :data:`desi_aap.stages.filters.FILTER_MODULES` that found
+anything gets its own message -- a header naming the run and what the filter
+found, the first ``[slack].max_rows`` candidates as a native Block Kit table,
+and a pointer to the full parquet output -- posted with the Slack Web API's
 ``chat.postMessage``.
+
+One message per filter rather than one per run because the filters answer
+different questions and are read by different people: a GW coincidence wants
+looking at tonight, while a superluminous supernova candidate can wait for the
+morning. Each filter says how its own candidates are announced, via the
+:class:`~desi_aap.stages.base.SlackDisplay` its module declares, so this module
+never learns what any particular filter means.
+
+A filter that found nothing is passed over in silence rather than posting an
+empty message; a run where every filter found nothing posts nothing at all.
+That is the normal outcome for most hours, not a sign that anything is wrong.
 
 Posting needs a *bot token*: register an app on https://api.slack.com/apps
 with the ``chat:write`` scope, install it to the workspace, and put the
@@ -12,36 +23,52 @@ resulting ``xoxb-`` token in a TOML file (``bot_token = "xoxb-..."``) outside
 the repository. The ``[slack]`` section names that file, the channel, and the
 row cutoff; the section is optional, and the stage skips itself when it is
 absent. The bot must be invited to the channel once (``/invite @<bot>``).
-
-The pipeline stops before this stage when an earlier one produces no rows, so
-a run with nothing to report posts nothing by design.
 """
 
 import json
 import logging
 import tomllib
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import nested_pandas as npd
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from desi_aap.boom import (
+    ALERT_BAND_COLUMN,
+    ALERT_DEC_COLUMN,
+    ALERT_ID_COLUMN,
+    ALERT_MAG_COLUMN,
+    ALERT_RA_COLUMN,
+)
 from desi_aap.config import PipelineConfig
-from desi_aap.stages.base import StageInputs, StageResult, input_result
-from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
+from desi_aap.stages.base import SlackDisplay, StageInputs, StageResult
+from desi_aap.stages.filters import FILTER_MODULES, FILTER_STAGES
 from desi_aap.utils import run_stamp
 
 logger = logging.getLogger(__name__)
 
 STAGE = "slack_publish"
 
-# The stage whose frame gets published. As stages are added between crossmatch
-# and this one, point this at the new last data stage.
-INPUT_STAGE = CROSSMATCH_STAGE
+# Every filter, since this stage announces them all. It is the one stage
+# that tolerates a required stage not having run: see run_slack_publish.
+REQUIRES: tuple[str, ...] = FILTER_STAGES
 
-# Flat columns the table shows, in order, skipping any the frame lacks.
-DISPLAY_COLUMNS = ["objectId", "candidate.ra", "candidate.dec"]
+# Flat columns every filter's table shows, in order, skipping any the frame
+# lacks. What identifies an alert, where to point a telescope, and how bright it
+# was in which band -- the last two together, since a magnitude without its band
+# is not a brightness anyone can act on. Whatever else makes a particular
+# filter's result worth reading comes from its own SlackDisplay.columns,
+# appended after these.
+DISPLAY_COLUMNS = [
+    ALERT_ID_COLUMN,
+    ALERT_RA_COLUMN,
+    ALERT_DEC_COLUMN,
+    ALERT_MAG_COLUMN,
+    ALERT_BAND_COLUMN,
+]
 
 
 def load_bot_token(path: Path) -> str:
@@ -101,14 +128,17 @@ def _match_columns(frame: npd.NestedFrame) -> list[str]:
     ]
 
 
-def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
-    """Render a stage's non-empty frame as one Slack message.
+def format_message(result: StageResult, display: SlackDisplay, max_rows: int) -> dict[str, Any]:
+    """Render one filter's non-empty frame as one Slack message.
 
     Parameters
     ----------
     result : StageResult
         The result to publish. Its ``frame`` must have at least one row; the
         message also names its ``stamp`` and, when set, its ``output_path``.
+    display : desi_aap.stages.base.SlackDisplay
+        How this filter's candidates are named, and which of its own columns to
+        show, as its module declares.
     max_rows : int
         How many rows the table lists before cutting off.
 
@@ -124,7 +154,8 @@ def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
     n_rows = len(frame)
 
     title = f"DESI Alert Augmentation Pipeline run {result.stamp}"
-    found = f"{n_rows} candidate{'' if n_rows == 1 else 's'} found"
+    plural = "" if n_rows == 1 else "s"
+    found = f"{n_rows} {display.title}{plural} found"
     cutoff = f". Showing the first {max_rows}:" if n_rows > max_rows else ":"
 
     # Each column is (name, its cells as strings, whether it right-aligns).
@@ -133,7 +164,7 @@ def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
     shown = frame.head(max_rows)
     columns = [
         (name, [_format_cell(value) for value in shown[name]], shown[name].dtype.kind == "f")
-        for name in DISPLAY_COLUMNS
+        for name in (*DISPLAY_COLUMNS, *display.columns)
         if name in frame.columns
     ]
     # Each catalog's column shows how many of its sources matched the alert.
@@ -213,7 +244,7 @@ def run_slack_publish(
     inputs: StageInputs | None = None,
     stamp: str | None = None,
 ) -> StageResult:
-    """Run the stage: render the previous stage's frame and post it to Slack.
+    """Run the stage: post one message for each filter that found something.
 
     Parameters
     ----------
@@ -221,56 +252,102 @@ def run_slack_publish(
         The pipeline configuration. Without a ``[slack]`` section the stage
         logs that it is skipping and posts nothing.
     dry_run : bool
-        Build the message and log it instead of posting it. Also the way to
+        Build each message and log it instead of posting it. Also the way to
         preview the formatting without a workspace.
     inputs : dict of str to StageResult, optional
-        Results of the stages that already ran. The frame to publish comes
-        from :data:`INPUT_STAGE`.
+        Results of the stages that already ran. The frames to publish come from
+        the filters in :data:`desi_aap.stages.filters.FILTER_MODULES`. A filter
+        that was switched off or skipped this run is passed over, since the
+        pipeline records an empty result for it either way.
     stamp : str, optional
         This run's timestamp. Defaults to now.
 
     Returns
     -------
     StageResult
-        The input frame, passed through unchanged so this stage never reads
-        as the one that ended the run; ``summary["posted"]`` says whether a
-        message went out.
+        ``frame`` is ``None``: this stage announces results rather than
+        producing any, and nothing runs after it. ``summary`` holds
+        ``n_posted``, how many messages went out, and ``rows_by_filter``, the
+        candidate count of every filter that has a result -- zero included, so
+        that a filter which ran and found nothing is told apart from one that
+        never ran.
 
     Raises
     ------
-    KeyError
-        If :data:`INPUT_STAGE` has not run.
     ValueError
         If the credentials file is missing or malformed.
     RuntimeError
-        If Slack rejects the message.
+        If Slack rejects any message. The filters that posted successfully stay
+        posted, and the error names every one that did not.
     """
     stamp = stamp or run_stamp()
-    upstream = input_result(inputs, INPUT_STAGE)
-    frame = upstream.frame
-    summary = {"posted": False, "n_rows": 0 if frame is None else len(frame)}
-    result = StageResult(stage=STAGE, frame=frame, stamp=stamp, summary=summary)
+
+    # Every filter that has a result, and how many candidates it contributed --
+    # including the ones that contributed none, so the summary distinguishes a
+    # filter that ran and found nothing from one that never ran at all. Unlike
+    # the data stages, a filter with no result is not an error here: the
+    # pipeline skips one whose input was empty, and switching one off in the
+    # config is how a nightly run avoids repeating the hourly one's work.
+    rows_by_filter: dict[str, int] = {}
+    published: list[tuple[ModuleType, StageResult]] = []
+    for module in FILTER_MODULES:
+        result = (inputs or {}).get(module.STAGE)
+        if result is None:
+            logger.info("Filter %r did not run.", module.STAGE)
+            continue
+        rows_by_filter[module.STAGE] = 0 if result.frame is None else len(result.frame)
+        if result.is_empty:
+            logger.info("Filter %r found nothing to publish.", module.STAGE)
+            continue
+        published.append((module, result))
+
+    summary: dict[str, Any] = {"n_posted": 0, "rows_by_filter": rows_by_filter}
+    outcome = StageResult(stage=STAGE, frame=None, stamp=stamp, summary=summary)
 
     if cfg.slack is None:
         logger.info("No [slack] section configured; skipping.")
-        return result
-    if frame is None or frame.empty:
-        logger.info("No rows to publish; posting nothing.")
-        return result
+        return outcome
+    if not published:
+        logger.info("No filter produced candidates; posting nothing.")
+        return outcome
 
-    message = format_message(upstream, cfg.slack.max_rows)
-    if dry_run:
+    # Each filter is posted on its own, and one Slack rejection does not stop
+    # the rest: the filters are independent, and a rate limit hit while
+    # announcing the first is no reason to withhold the second. The failures are
+    # collected and raised together at the end, so the run still fails loudly
+    # rather than reporting a partial post as a success.
+    token = None if dry_run else load_bot_token(cfg.slack.credentials)
+    failures: list[str] = []
+    for module, result in published:
+        message = format_message(result, module.SLACK_DISPLAY, cfg.slack.max_rows)
+        if dry_run:
+            logger.info(
+                "Dry run: not posting %r to Slack. %s Blocks payload:\n%s",
+                module.STAGE,
+                message["text"],
+                json.dumps(message["blocks"], indent=2),
+            )
+            continue
+        try:
+            post_message(token, cfg.slack.channel, message["text"], message["blocks"])
+        except RuntimeError as exc:
+            logger.error("Could not post %r to %s: %s", module.STAGE, cfg.slack.channel, exc)
+            failures.append(f"{module.STAGE}: {exc}")
+            continue
+        summary["n_posted"] += 1
         logger.info(
-            "Dry run: not posting to Slack. %s Blocks payload:\n%s",
-            message["text"],
-            json.dumps(message["blocks"], indent=2),
+            "Posted %d of %d %s row(s) to %s.",
+            min(len(result.frame), cfg.slack.max_rows),
+            len(result.frame),
+            module.STAGE,
+            cfg.slack.channel,
         )
-        return result
 
-    token = load_bot_token(cfg.slack.credentials)
-    post_message(token, cfg.slack.channel, message["text"], message["blocks"])
-    summary["posted"] = True
-    logger.info(
-        "Posted %d of %d row(s) to %s.", min(len(frame), cfg.slack.max_rows), len(frame), cfg.slack.channel
-    )
-    return result
+    summary["failed_filters"] = [name.split(":", 1)[0] for name in failures]
+    if failures:
+        logger.info("Slack summary: %s", summary)
+        raise RuntimeError(
+            f"Posted {summary['n_posted']} of {len(published)} filter message(s); "
+            f"{len(failures)} failed. {' | '.join(failures)}"
+        )
+    return outcome
