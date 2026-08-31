@@ -210,12 +210,12 @@ def test_max_rows_must_be_positive(slack_credentials):
         )
 
 
-# TODO(#XX): localize now runs before this stage and is empty on most runs, so
+# TODO(#45): localize now runs before this stage and is empty on most runs, so
 # run_pipeline's stop-on-empty ends the run before slack_publish is reached. The
 # assertion below is left as written -- it is the invariant we still want -- so
 # strict xfail reports XPASS the moment the stage order is settled.
 @pytest.mark.xfail(
-    reason="#XX: localize precedes slack_publish and stops the run when it finds no coincidence",
+    reason="#45: localize precedes slack_publish and stops the run when it finds no coincidence",
     strict=True,
 )
 def test_the_stage_runs_last(slack_config, stub_boom, posted):
