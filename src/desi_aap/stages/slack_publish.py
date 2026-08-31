@@ -1,6 +1,6 @@
 """Post each filter's candidates to a Slack channel, one message per filter.
 
-Each filter in :data:`desi_aap.stages.filters.FILTER_MODULES` that found
+Each filter in :func:`desi_aap.stages.filters.filter_descriptors` that found
 anything gets its own message -- a header naming the run and what the filter
 found, the first ``[slack].max_rows`` candidates as a native Block Kit table,
 and a pointer to the full parquet output -- posted with the Slack Web API's
@@ -29,7 +29,6 @@ import json
 import logging
 import tomllib
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 import nested_pandas as npd
@@ -45,16 +44,18 @@ from desi_aap.boom import (
 )
 from desi_aap.config import PipelineConfig
 from desi_aap.stages.base import SlackDisplay, StageInputs, StageResult
-from desi_aap.stages.filters import FILTER_MODULES, FILTER_STAGES
+from desi_aap.stages.filters import FilterDescriptor, filter_descriptors
 from desi_aap.utils import run_stamp
 
 logger = logging.getLogger(__name__)
 
 STAGE = "slack_publish"
 
-# Every filter, since this stage announces them all. It is the one stage
+# This stage requires every filter, and the filters come from the config --
+# each JSON file in the filters directory is one -- so its dependencies cannot
+# be a module constant. desi_aap.pipeline.stages_for builds them per run, from
+# the same filter_descriptors this module announces. It is also the one stage
 # that tolerates a required stage not having run: see run_slack_publish.
-REQUIRES: tuple[str, ...] = FILTER_STAGES
 
 # Flat columns every filter's table shows, in order, skipping any the frame
 # lacks. What identifies an alert, where to point a telescope, and how bright it
@@ -243,6 +244,7 @@ def run_slack_publish(
     dry_run: bool = False,
     inputs: StageInputs | None = None,
     stamp: str | None = None,
+    descriptors: tuple[FilterDescriptor, ...] | None = None,
 ) -> StageResult:
     """Run the stage: post one message for each filter that found something.
 
@@ -256,11 +258,16 @@ def run_slack_publish(
         preview the formatting without a workspace.
     inputs : dict of str to StageResult, optional
         Results of the stages that already ran. The frames to publish come from
-        the filters in :data:`desi_aap.stages.filters.FILTER_MODULES`. A filter
+        the filters in :func:`desi_aap.stages.filters.filter_descriptors`. A filter
         that was switched off or skipped this run is passed over, since the
         pipeline records an empty result for it either way.
     stamp : str, optional
         This run's timestamp. Defaults to now.
+    descriptors : tuple of FilterDescriptor, optional
+        The filters to announce. The pipeline binds the ones the run was built
+        from, so the stage set cannot drift between building the run and
+        announcing it -- a filter file edited or deleted mid-run changes the
+        *next* run. Left out (a direct call), they are read from the config.
 
     Returns
     -------
@@ -274,6 +281,11 @@ def run_slack_publish(
 
     Raises
     ------
+    KeyError
+        If a filter has no entry in ``inputs`` at all. Every run records a
+        result for every filter -- a skipped one gets a ``skipped`` summary --
+        so an absent entry means the inputs were mis-keyed, and treating that
+        as "found nothing" would silently drop real candidates.
     ValueError
         If the credentials file is missing or malformed.
     RuntimeError
@@ -281,25 +293,33 @@ def run_slack_publish(
         posted, and the error names every one that did not.
     """
     stamp = stamp or run_stamp()
+    if descriptors is None:
+        descriptors = filter_descriptors(cfg)
 
-    # Every filter that has a result, and how many candidates it contributed --
+    # Every filter that ran, and how many candidates it contributed --
     # including the ones that contributed none, so the summary distinguishes a
-    # filter that ran and found nothing from one that never ran at all. Unlike
-    # the data stages, a filter with no result is not an error here: the
-    # pipeline skips one whose input was empty, and switching one off in the
-    # config is how a nightly run avoids repeating the hourly one's work.
+    # filter that ran and found nothing from one that was switched off or
+    # skipped. The skipped ones are absent from the counts and named in the
+    # log, because "the GW search was off" and "the GW search found nothing"
+    # must not read the same.
     rows_by_filter: dict[str, int] = {}
-    published: list[tuple[ModuleType, StageResult]] = []
-    for module in FILTER_MODULES:
-        result = (inputs or {}).get(module.STAGE)
+    published: list[tuple[FilterDescriptor, StageResult]] = []
+    for descriptor in descriptors:
+        result = (inputs or {}).get(descriptor.stage)
         if result is None:
-            logger.info("Filter %r did not run.", module.STAGE)
+            raise KeyError(
+                f"Filter {descriptor.stage!r} has no result in this run's inputs. Every run "
+                "records one, even for a skipped filter, so a missing entry means the inputs "
+                "are mis-keyed rather than that the filter found nothing."
+            )
+        if result.summary.get("skipped"):
+            logger.info("Filter %r did not run (%s).", descriptor.stage, result.summary["skipped"])
             continue
-        rows_by_filter[module.STAGE] = 0 if result.frame is None else len(result.frame)
+        rows_by_filter[descriptor.stage] = 0 if result.frame is None else len(result.frame)
         if result.is_empty:
-            logger.info("Filter %r found nothing to publish.", module.STAGE)
+            logger.info("Filter %r found nothing to publish.", descriptor.stage)
             continue
-        published.append((module, result))
+        published.append((descriptor, result))
 
     summary: dict[str, Any] = {"n_posted": 0, "rows_by_filter": rows_by_filter}
     outcome = StageResult(stage=STAGE, frame=None, stamp=stamp, summary=summary)
@@ -317,33 +337,39 @@ def run_slack_publish(
     # collected and raised together at the end, so the run still fails loudly
     # rather than reporting a partial post as a success.
     token = None if dry_run else load_bot_token(cfg.slack.credentials)
+    failed_filters: list[str] = []
     failures: list[str] = []
-    for module, result in published:
-        message = format_message(result, module.SLACK_DISPLAY, cfg.slack.max_rows)
+    for descriptor, result in published:
+        message = format_message(result, descriptor.slack_display, cfg.slack.max_rows)
         if dry_run:
             logger.info(
                 "Dry run: not posting %r to Slack. %s Blocks payload:\n%s",
-                module.STAGE,
+                descriptor.stage,
                 message["text"],
                 json.dumps(message["blocks"], indent=2),
             )
             continue
         try:
             post_message(token, cfg.slack.channel, message["text"], message["blocks"])
-        except RuntimeError as exc:
-            logger.error("Could not post %r to %s: %s", module.STAGE, cfg.slack.channel, exc)
-            failures.append(f"{module.STAGE}: {exc}")
+        # Not just the RuntimeError post_message wraps Slack's rejections in:
+        # a transport-level error (SSL, connection reset, DNS) raises something
+        # else entirely, and one filter's network mishap is no more a reason to
+        # withhold its siblings' messages than a rejection is.
+        except Exception as exc:
+            logger.error("Could not post %r to %s: %s", descriptor.stage, cfg.slack.channel, exc)
+            failed_filters.append(descriptor.stage)
+            failures.append(f"{descriptor.stage}: {exc}")
             continue
         summary["n_posted"] += 1
         logger.info(
             "Posted %d of %d %s row(s) to %s.",
             min(len(result.frame), cfg.slack.max_rows),
             len(result.frame),
-            module.STAGE,
+            descriptor.stage,
             cfg.slack.channel,
         )
 
-    summary["failed_filters"] = [name.split(":", 1)[0] for name in failures]
+    summary["failed_filters"] = failed_filters
     if failures:
         logger.info("Slack summary: %s", summary)
         raise RuntimeError(

@@ -143,18 +143,50 @@ def test_an_empty_filter_posts_nothing(slack_config, posted):
     assert result.summary["rows_by_filter"] == {LOCALIZE_STAGE: 0}
 
 
-def test_a_filter_that_did_not_run_is_passed_over(slack_config, posted):
-    """Verify a skipped or switched-off filter is silence, not an error.
+def test_a_skipped_filter_is_passed_over_but_not_counted_as_quiet(slack_config, posted):
+    """Verify a switched-off filter reads as "did not run", never as "found nothing".
 
-    Unlike the data stages, a missing filter is normal here: the pipeline skips
-    one whose input was empty, and switching one off is how a nightly run avoids
-    repeating the hourly one's work.
+    The pipeline records a result for a skipped filter, marked as such; this
+    stage must keep it out of the per-filter counts, because "the GW search was
+    off" and "the GW search found nothing" must not read the same.
     """
-    result = run_slack_publish(slack_config, inputs={}, stamp=STAMP)
+    skipped = StageResult(stage=LOCALIZE_STAGE, stamp=STAMP, summary={"skipped": "disabled"})
+
+    result = run_slack_publish(slack_config, inputs={LOCALIZE_STAGE: skipped}, stamp=STAMP)
 
     assert posted == []
     # Absent entirely, rather than present with a zero: it never ran.
     assert result.summary["rows_by_filter"] == {}
+
+
+def test_a_filter_missing_from_the_inputs_entirely_fails_loudly(slack_config, posted):
+    """Verify mis-keyed inputs cannot silently drop real candidates.
+
+    Every run records a result for every filter, so an absent entry is a typo
+    in a programmatic call, and "exit 0, post nothing" would be the worst
+    possible reading of it.
+    """
+    with pytest.raises(KeyError, match=LOCALIZE_STAGE):
+        run_slack_publish(slack_config, inputs={}, stamp=STAMP)
+
+    assert posted == []
+
+
+def test_a_transport_error_is_isolated_like_a_rejection(slack_config, match_inputs, monkeypatch):
+    """Verify a network-level failure, not just a Slack rejection, spares the siblings.
+
+    post_message wraps Slack's own rejections in RuntimeError, but an SSL or
+    connection error raises something else entirely, and one filter's network
+    mishap is no more a reason to withhold the others than a rejection is.
+    """
+
+    def unplugged(token, channel, text, blocks=None):
+        raise ConnectionResetError("wire fell out")
+
+    monkeypatch.setattr(slack_publish, "post_message", unplugged)
+
+    with pytest.raises(RuntimeError, match=r"Posted 0 of 1.*wire fell out"):
+        run_slack_publish(slack_config, inputs=match_inputs, stamp=STAMP)
 
 
 def test_one_rejected_message_does_not_withhold_the_others(slack_config, match_inputs, monkeypatch):
@@ -256,7 +288,7 @@ def test_the_stage_runs_last_and_a_quiet_run_reaches_it(slack_config, stub_boom,
     results = pipeline.run_pipeline(slack_config, stamp=STAMP)
 
     assert list(results)[-1] == STAGE
-    assert set(results) == set(pipeline.STAGE_ORDER)
+    assert set(results) == set(pipeline.stage_order(slack_config))
     assert results[LOCALIZE_STAGE].is_empty
     assert results[STAGE].summary["skipped"] == "no input"
     assert posted == []

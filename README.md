@@ -16,17 +16,19 @@ DESI and put at their hosts' distances — and then fans out into *filters*, eac
 asking a different question of those same alerts.
 
 ```
-query → crossmatch → distance ─┬→ localize ──┐
-                               │             ├→ slack_publish
-                               └→ …          ┘
+query → crossmatch → distance ─┬→ localize (GW)      ──┐
+                               ├→ luminous (SLSN/TDE) ─┼→ slack_publish
+                               └→ nearby (≤ 750 Mpc)  ─┘
 ```
 
 | Stage | Does | Writes |
 |---|---|---|
 | `query` | Queries the [BOOM](https://api.kaboom.caltech.edu) broker for alerts in a time window (`desi_aap.boom`) | `query/alerts_<stamp>.parquet` |
 | `crossmatch` | Wraps those alerts in an LSDB catalog and cross-matches them against the DESI spectroscopic catalogs (`desi_aap.stages.crossmatch`), keeping the alerts that matched | `crossmatch/matches_<stamp>.parquet` |
-| `distance` | Picks each alert's nearest DESI host and turns its redshift into a luminosity distance (`desi_aap.stages.distance`), dropping alerts with no usable host | `distance/distances_<stamp>.parquet` |
+| `distance` | Picks each alert's nearest DESI host, turns its redshift into a luminosity distance, and computes the absolute magnitude the alert would have there (`desi_aap.stages.distance`), dropping alerts with no usable host | `distance/distances_<stamp>.parquet` |
 | `localize` | **Filter.** Scores those alerts against public LIGO/Virgo superevents (`desi_aap.stages.localize`), keeping the ones inside a 3D credible volume | `localize/coincidences_<stamp>.parquet` |
+| `luminous` | **Filter**, from `filters/luminous.json`: keeps alerts brighter than absolute magnitude −20 at their host's distance — the SLSN/TDE screen | `luminous/candidates_<stamp>.parquet` |
+| `nearby` | **Filter**, from `filters/nearby.json`: keeps alerts within 750 Mpc | `nearby/candidates_<stamp>.parquet` |
 | `slack_publish` | Posts one message per filter that found something (`desi_aap.stages.slack_publish`). Skips itself unless a `[slack]` section is configured — see [Slack publishing](#slack-publishing) | nothing |
 
 Every filter is a cut on distance in some form — a GW credible *volume*, an
@@ -36,8 +38,52 @@ its own stage rather than something each filter works out for itself.
 Filters are siblings, so a stage that produces nothing **skips** what depends
 on it rather than ending the run. Most hours have no GW superevent within
 `window_days`, and a run where `localize` finds nothing must still let the
-other filters report. The filters are listed in `desi_aap.stages.filters`;
-adding one is an entry there and an entry in `desi_aap.pipeline.STAGES`.
+other filters report.
+
+### Adding a filter
+
+A filter that is nothing but cuts on the placed-alert columns is **one JSON
+file** in the `filters/` directory — drop it in, and the next run picks it up
+as a stage of its own, with its own parquet output and its own Slack message.
+Nothing else changes anywhere:
+
+```json
+{
+  "title": "g-band candidate",
+  "description": "Whatever you want to note about this filter.",
+  "columns": ["abs_mag_SHOES", "host_redshift"],
+  "cuts": [
+    {"column": "abs_mag_SHOES", "max": -17.0},
+    {"column": "candidate.band", "one_of": ["g"]}
+  ]
+}
+```
+
+The filename (minus `.json`) is the filter's name: its stage name, its output
+directory, and how `[filters] disabled` and `--from-stage` address it. The
+grammar, in full:
+
+- `cuts` — required, at least one. Every cut must pass for an alert to be a
+  candidate. Each names a `column` of the `distance` stage's output and at
+  least one of `min` / `max` (inclusive numeric bounds) or `one_of` (values a
+  label column must be among). A missing or non-numeric value fails the cut; a
+  cut on a column that doesn't exist fails the run, loudly.
+- `title` — names the candidates in the Slack message, written to read with a
+  count in front ("3 g-band candidates found"). Defaults to `"<name> candidate"`.
+- `columns` — extra columns the Slack table shows after the ones every filter
+  shows (`objectId`, coordinates, `candidate.magpsf`, `candidate.band`).
+- `description` — for the person reading the file; otherwise unused.
+
+Unknown keys are rejected, so a typo (`"maximum"` for `"max"`) fails the run
+rather than silently weakening a filter. Useful columns to cut on:
+`dist_mpc_<cosmology>`, `abs_mag_<cosmology>` (for `SHOES` and `Planck18`),
+`host_redshift`, `host_sep_arcsec`, `candidate.magpsf`, `candidate.band`.
+
+A filter that has to *measure* something — the GW match needs GraceDB, skymaps
+and a temporal window — is a Python module instead: `STAGE`, `REQUIRES`,
+`SLACK_DISPLAY`, a runner, a config section, and an entry in
+`desi_aap.stages.filters.FILTER_MODULES`. Both kinds meet in
+`filter_descriptors`, and downstream of that nothing knows the difference.
 
 ### Install and run
 
@@ -47,7 +93,7 @@ pip install -e '.[dev]'
 export BOOM_USERNAME=... BOOM_PASSWORD=...
 desi-aap run --config config.toml
 
-desi-aap stages          # list the stages, in the order they run
+desi-aap stages -c config.toml   # list the stages, in the order they run
 ```
 
 ### Configuration
@@ -64,13 +110,15 @@ three settings have no default and must be written down, because they are what a
 result *means* — which events were considered (`se_types`), over what stretch of
 time (`window_days`), and how tightly (`credible_level`).
 
-Every *filter's* section takes `enabled`, which defaults to true. Switching one
-off is how one config runs the hourly search and another the nightly one; see
+Every filter can be switched off, and that is how one config runs the hourly
+search and another the nightly one; see
 [Running filters on different cadences](#running-filters-on-different-cadences).
-Only the filters take it — the stages they all depend on have nothing to gain
-from being switched off, and `slack_publish` is already silenced by leaving
-`[slack]` out. Writing `enabled` into any other section is a config error, not
-a silent no-op.
+`[filters] disabled` names any filter to skip, whichever kind — it lives in
+TOML because JSON files do not ride the `--config` merge; a code filter's own
+section also takes `enabled` (default true). Only the filters have switches — the stages they all depend on have
+nothing to gain from being off, and `slack_publish` is already silenced by
+leaving `[slack]` out. Writing `enabled` into any other section is a config
+error, not a silent no-op.
 
 `output_dir` and the GraceDB `cache_dir` are relative, so a fresh clone works
 anywhere with no setup. Both therefore follow the working directory: see
@@ -112,6 +160,13 @@ n_neighbors = 1
 [distance]
 # Defaulted. Omit the whole section to take this value.
 min_redshift = 0.0002
+
+[filters]
+# Where the JSON filter definitions live; each <name>.json is one filter.
+# Defaulted, and relative like output_dir.
+dir = "filters"
+# JSON filters to skip this run, by name. The cadence overlays' knob.
+disabled = []
 
 [localize]
 # Defaulted: every filter is on unless a config says otherwise.
@@ -186,6 +241,10 @@ gets its own subdirectory of `run.output_dir`:
 │   └── distances_20260807T182718Z.parquet     # those alerts, at their hosts' distances
 ├── localize/
 │   └── coincidences_20260807T182718Z.parquet  # the alerts inside a GW credible volume
+├── luminous/
+│   └── candidates_20260807T182718Z.parquet    # the alerts brighter than -20
+├── nearby/
+│   └── candidates_20260807T182718Z.parquet    # the alerts within 750 Mpc
 └── logs/
     └── 20260807T182718Z.log                   # what the run did
 ```
@@ -231,21 +290,23 @@ called, and the lookback and the cadence stay consistent because they are
 written down together.
 
 ```toml
-# hourly.toml — the fast search, for things that decay.
+# hourly.toml — the fast search, for things that decay. The GW filter runs;
+# the slow screens wait for the nightly sweep.
 [query.window]
 lookback = "1h"
 
-[localize]
-enabled = true
+[filters]
+disabled = ["luminous", "nearby"]
 ```
 
 ```toml
-# nightly.toml — the slow sweep, over the whole day's alerts.
+# nightly.toml — the slow sweep, over the whole day's alerts. The JSON filters
+# run; the GW search already ran every hour.
 [query.window]
 lookback = "1d"
 
 [localize]
-enabled = false   # the hourly run already covered these
+enabled = false
 ```
 
 ```cron
@@ -280,14 +341,15 @@ Every message shows what identifies an alert and where to point a telescope —
 `objectId`, its coordinates, and `candidate.magpsf` with the `candidate.band`
 it was measured in, since a magnitude without its band is not a brightness
 anyone can act on. After those come whichever columns the filter itself
-considers worth reading, from the `SLACK_DISPLAY` its module declares.
+considers worth reading — a code filter's `SLACK_DISPLAY`, a JSON filter's
+`"columns"` key.
 
 One message per filter rather than one per run because the filters answer
 different questions and are read by different people — a GW coincidence wants
 looking at tonight, a superluminous supernova candidate can wait for the
-morning. Each filter says how its own candidates are announced, through the
-`SLACK_DISPLAY` its module declares, so `slack_publish` never learns what any
-particular filter means.
+morning. Each filter says how its own candidates are announced — its title and
+its extra columns — so `slack_publish` never learns what any particular filter
+means.
 
 A filter that found nothing is passed over in silence rather than posting an
 empty message, and a run where every filter found nothing posts nothing at all.
@@ -335,8 +397,10 @@ desi-aap run -c config.toml --from-stage slack_publish \
 
 `--input` stands in for whatever the starting stage consumes, which the stage
 itself declares. `slack_publish` consumes every filter, and one file cannot be
-several, so it is offered to each of them — which makes this a preview of the
-formatting rather than a faithful replay of a run.
+several, so it stands in for the *first* of them (the GW filter) and the rest
+are treated as not run — one message, honestly labeled, rather than the same
+rows posted once per filter under cuts that never ran. To exercise a specific
+filter, start from that filter instead.
 
 ## The distance stage
 

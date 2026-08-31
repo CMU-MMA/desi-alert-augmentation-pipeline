@@ -1,0 +1,8 @@
+{
+  "title": "luminous transient candidate",
+  "description": "SLSN/TDE screen: absolute magnitude at the host's distance brighter than -20 under the SHOES cosmology. No K-correction or extinction; see the distance stage.",
+  "columns": ["abs_mag_SHOES", "dist_mpc_SHOES", "host_redshift"],
+  "cuts": [
+    {"column": "abs_mag_SHOES", "max": -20.0}
+  ]
+}

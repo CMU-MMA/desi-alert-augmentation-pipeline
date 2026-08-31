@@ -38,7 +38,7 @@ def host(z=NEARBY_HOST_Z, zwarn=0, sep=1.0):
     return {"Z": z, "ZWARN": zwarn, "_dist_arcsec": sep}
 
 
-def make_matches(hosts_by_catalog, *, jd=GW190425_JD, ra=240.0, dec=-20.0, n_alerts=None):
+def make_matches(hosts_by_catalog, *, jd=GW190425_JD, ra=240.0, dec=-20.0, magpsf=None, n_alerts=None):
     """Build a crossmatch-stage frame: alerts with one nested column per catalog.
 
     Here rather than in one test module because it describes the input to the
@@ -53,6 +53,11 @@ def make_matches(hosts_by_catalog, *, jd=GW190425_JD, ra=240.0, dec=-20.0, n_ale
         as :func:`host` returns.
     jd, ra, dec : float or sequence
         The alerts' own columns, broadcast when scalar.
+    magpsf : float or sequence, optional
+        Apparent magnitudes. None (the default) leaves the column off the
+        frame entirely, the shape an alert stream without photometry has. At
+        construction rather than assigned after, because NestedFrame reads a
+        dotted name in ``frame[...] = ...`` as nested-column access.
     n_alerts : int, optional
         Number of alerts, inferred from the first catalog's list otherwise.
 
@@ -63,15 +68,15 @@ def make_matches(hosts_by_catalog, *, jd=GW190425_JD, ra=240.0, dec=-20.0, n_ale
     """
     if n_alerts is None:
         n_alerts = len(next(iter(hosts_by_catalog.values())))
-    frame = npd.NestedFrame(
-        {
-            "objectId": [f"LSST{i:03d}" for i in range(n_alerts)],
-            "candidate.ra": np.broadcast_to(np.asarray(ra, dtype=float), (n_alerts,)).copy(),
-            "candidate.dec": np.broadcast_to(np.asarray(dec, dtype=float), (n_alerts,)).copy(),
-            "candidate.jd": np.broadcast_to(np.asarray(jd, dtype=float), (n_alerts,)).copy(),
-        },
-        index=range(n_alerts),
-    )
+    columns = {
+        "objectId": [f"LSST{i:03d}" for i in range(n_alerts)],
+        "candidate.ra": np.broadcast_to(np.asarray(ra, dtype=float), (n_alerts,)).copy(),
+        "candidate.dec": np.broadcast_to(np.asarray(dec, dtype=float), (n_alerts,)).copy(),
+        "candidate.jd": np.broadcast_to(np.asarray(jd, dtype=float), (n_alerts,)).copy(),
+    }
+    if magpsf is not None:
+        columns["candidate.magpsf"] = np.broadcast_to(np.asarray(magpsf, dtype=float), (n_alerts,)).copy()
+    frame = npd.NestedFrame(columns, index=range(n_alerts))
     for name, per_alert in hosts_by_catalog.items():
         flat = pd.DataFrame(
             [host_row for hosts in per_alert for host_row in hosts],
@@ -164,6 +169,9 @@ def pipeline_config(tmp_path, desi_dr1_cosmos_dir):
     the defaults, so that a change to one of those defaults shows up as a test
     failure here rather than silently moving what the suite exercises.
     """
+    # Created empty rather than merely named: a filters dir that is set
+    # explicitly but missing is a config error by design.
+    (tmp_path / "filters").mkdir(exist_ok=True)
     return PipelineConfig.model_validate(
         {
             "run": {"output_dir": str(tmp_path / "out")},
@@ -177,7 +185,12 @@ def pipeline_config(tmp_path, desi_dr1_cosmos_dir):
                     }
                 }
             },
-            "distance": {"min_redshift": 0.0002},
+            "distance": {"min_redshift": TEST_MIN_REDSHIFT},
+            # Pinned under tmp_path (and left empty) so no test silently picks
+            # up the repo's shipped filters/ directory from the working
+            # directory. Tests that want JSON filters write their own files
+            # here; the shipped definitions get their own explicit tests.
+            "filters": {"dir": str(tmp_path / "filters")},
             "localize": {
                 "enabled": True,
                 "se_types": ["BNS", "NSBH"],

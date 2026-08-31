@@ -13,6 +13,10 @@ host selection, the cosmology, the nesting, the message building -- is the real
 code doing real work.
 """
 
+import json
+import shutil
+from pathlib import Path
+
 import nested_pandas as npd
 import pytest
 
@@ -49,11 +53,11 @@ def full_run(slack_config, stub_boom, stub_gracedb, superevent_during_alerts, po
     return results, posted
 
 
-def test_every_stage_runs_and_produces_rows(full_run):
+def test_every_stage_runs_and_produces_rows(full_run, slack_config):
     """Verify a run with candidates reaches every stage rather than stopping short."""
     results, _ = full_run
 
-    assert list(results) == pipeline.STAGE_ORDER
+    assert list(results) == pipeline.stage_order(slack_config)
     for stage in (QUERY_STAGE, CROSSMATCH_STAGE, DISTANCE_STAGE, LOCALIZE_STAGE):
         assert not results[stage].is_empty, f"{stage} produced nothing"
         assert "skipped" not in results[stage].summary, f"{stage} was skipped"
@@ -183,7 +187,7 @@ def test_a_quiet_run_reaches_the_end_without_posting(
     assert results[DISTANCE_STAGE].output_path.exists()
     assert results[LOCALIZE_STAGE].is_empty
     assert results[LOCALIZE_STAGE].output_path is None
-    assert list(results) == pipeline.STAGE_ORDER
+    assert list(results) == pipeline.stage_order(slack_config)
 
 
 def test_a_disabled_filter_leaves_the_earlier_stages_alone(
@@ -206,3 +210,114 @@ def test_a_disabled_filter_leaves_the_earlier_stages_alone(
     for stage in (QUERY_STAGE, CROSSMATCH_STAGE, DISTANCE_STAGE):
         assert not results[stage].is_empty
         assert results[stage].output_path.exists()
+
+
+# --- The JSON filter API, end to end. ----------------------------------------
+
+
+@pytest.fixture
+def shipped_filters_config(slack_config):
+    """The slack-enabled config, pointed at the repo's real filters directory.
+
+    The shipped luminous.json and nearby.json under test here are the ones an
+    operator gets, not copies: a change to either file changes what these tests
+    run.
+    """
+    repo_filters = Path(__file__).parents[2] / "filters"
+    return slack_config.model_copy(
+        update={"filters": slack_config.filters.model_copy(update={"dir": repo_filters})}
+    )
+
+
+def test_the_shipped_filters_run_as_stages_end_to_end(
+    shipped_filters_config, stub_boom, stub_gracedb, superevent_during_alerts, posted
+):
+    """The whole point of the filter API: the JSON files are stages like any other.
+
+    The committed alerts sit at z~0.47 (~2500 Mpc), so the luminous screen
+    (abs mag <= -20 at that distance) keeps them all and the 750 Mpc cut keeps
+    none -- one filter announcing and one silent, from the same placed alerts.
+    """
+    results = pipeline.run_pipeline(shipped_filters_config, stamp=STAMP)
+
+    assert list(results) == [
+        *[s.name for s in pipeline.DATA_STAGES],
+        LOCALIZE_STAGE,
+        "luminous",
+        "nearby",
+        SLACK_STAGE,
+    ]
+
+    luminous = results["luminous"]
+    assert luminous.summary["n_candidates"] == luminous.summary["n_alerts"] == N_MATCHED
+    assert (results["luminous"].frame["abs_mag_SHOES"] <= -20).all()
+    assert luminous.output_path.exists()
+
+    nearby = results["nearby"]
+    assert nearby.summary["n_candidates"] == 0
+    assert nearby.summary["survivors_by_cut"] == {"dist_mpc_SHOES <= 750.0": 0}
+    assert nearby.output_path is None
+
+    # Three filters ran; two found candidates; two messages went out, each
+    # naming its own filter's candidates and pointing at its own file.
+    assert results[SLACK_STAGE].summary["n_posted"] == 2
+    assert results[SLACK_STAGE].summary["rows_by_filter"] == {
+        LOCALIZE_STAGE: N_MATCHED,
+        "luminous": N_MATCHED,
+        "nearby": 0,
+    }
+    texts = [call["text"] for call in posted]
+    assert any("GW coincidence candidate" in text for text in texts)
+    assert any("luminous transient candidate" in text for text in texts)
+    assert not any("nearby" in text for text in texts)
+
+
+def test_dropping_a_json_file_in_is_the_whole_job(
+    slack_config, stub_boom, stub_gracedb, superevent_during_alerts, posted
+):
+    """The API's promise, verified literally: write one file, get one stream.
+
+    No registry edit, no config edit, no new module -- the filters directory the
+    config already points at simply gains a file between two runs.
+    """
+    before = pipeline.run_pipeline(slack_config, stamp=STAMP)
+    assert "band_g" not in before
+
+    (slack_config.filters.dir / "band_g.json").write_text(
+        json.dumps(
+            {
+                "title": "g-band candidate",
+                "cuts": [{"column": "candidate.band", "one_of": ["g"]}],
+            }
+        )
+    )
+    posted.clear()
+
+    after = pipeline.run_pipeline(slack_config, stamp="20260807T130000Z")
+
+    result = after["band_g"]
+    assert result.summary["n_candidates"] > 0
+    assert (result.frame["candidate.band"] == "g").all()
+    assert result.output_path.parent == slack_config.run.stage_dir("band_g")
+    texts = [call["text"] for call in posted]
+    assert any("g-band candidate" in text for text in texts)
+
+
+def test_a_filter_cutting_on_a_phantom_column_fails_the_run_loudly(
+    shipped_filters_config, stub_boom, stub_gracedb, superevent_during_alerts, posted
+):
+    """The way a JSON filter really breaks: cutting on a column that never exists.
+
+    That must end the run with the column named, not read as a filter that
+    found nothing -- a broken filter and a quiet one must be distinguishable.
+    The shipped directory stays as shipped; the broken file goes in a copy.
+    """
+    own_dir = shipped_filters_config.run.output_dir.parent / "filters_copy"
+    shutil.copytree(shipped_filters_config.filters.dir, own_dir)
+    (own_dir / "broken.json").write_text('{"cuts": [{"column": "no_such_column", "max": 1}]}')
+    cfg = shipped_filters_config.model_copy(
+        update={"filters": shipped_filters_config.filters.model_copy(update={"dir": own_dir})}
+    )
+
+    with pytest.raises(ValueError, match="no_such_column"):
+        pipeline.run_pipeline(cfg, stamp=STAMP)

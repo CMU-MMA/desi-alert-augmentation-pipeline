@@ -51,7 +51,7 @@ class StageResult:
     ----------
     stage : str
         The stage that produced this, as it appears in
-        :data:`desi_aap.pipeline.STAGE_ORDER`.
+        :func:`desi_aap.pipeline.stage_order`.
     frame : nested_pandas.NestedFrame or None
         The table this stage produced. ``None`` when the stage had nothing to
         produce, such as a window that returned no alerts.
@@ -137,7 +137,7 @@ def input_result(inputs: StageInputs | None, producer: str) -> StageResult:
     if not inputs or producer not in inputs:
         raise KeyError(
             f"Stage {producer!r} has not run, so its output is not available. "
-            f"Stages run in desi_aap.pipeline.STAGE_ORDER; check that {producer!r} precedes "
+            f"Stages run in desi_aap.pipeline.stages_for order; check that {producer!r} precedes "
             "the stage consuming it."
         )
     result = inputs[producer]

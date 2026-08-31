@@ -1,6 +1,9 @@
 """The distance stage: choosing each alert's host, and putting it at a distance."""
 
+import logging
+
 import nested_pandas as npd
+import numpy as np
 import pytest
 from conftest import NEARBY_HOST_Z, TEST_MIN_REDSHIFT, host, make_matches
 
@@ -8,10 +11,12 @@ from desi_aap.cosmology import COSMOLOGIES
 from desi_aap.stages.base import StageResult
 from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
 from desi_aap.stages.distance import (
+    ABS_MAG_COLUMNS,
     DIST_COLUMNS,
     HOST_COLUMNS,
     OUTPUT_PREFIX,
     STAGE,
+    abs_mag_column,
     attach_distances,
     dist_column,
     nearest_hosts,
@@ -126,6 +131,36 @@ def test_attach_distances_keeps_the_alerts_own_columns(matches) -> None:
     assert placed["objectId"].tolist() == ["LSST000", "LSST001"]
     assert isinstance(placed.dtypes["desi_dr1"], npd.NestedDtype)
     assert placed["host_redshift"].tolist() == [NEARBY_HOST_Z, NEARBY_HOST_Z]
+
+
+def test_attach_distances_computes_the_distance_modulus() -> None:
+    """Verify M = m - 5(log10 d_Mpc + 5), per cosmology, from the alert's own magnitude."""
+    matches = make_matches({"desi_dr1": [[host(sep=1.0)], [host(sep=2.0)]]}, magpsf=[20.0, 22.5])
+    hosts = nearest_hosts(matches, ["desi_dr1"], min_redshift=TEST_MIN_REDSHIFT)
+
+    placed = attach_distances(matches, hosts)
+
+    for label in COSMOLOGIES:
+        expected = matches["candidate.magpsf"] - 5 * (np.log10(placed[dist_column(label)]) + 5)
+        np.testing.assert_allclose(placed[abs_mag_column(label)], expected)
+
+
+def test_no_magnitude_column_means_no_abs_mag_columns_at_all(matches, caplog) -> None:
+    """Verify a frame without magpsf gets no abs_mag columns rather than all-NaN ones.
+
+    All-NaN columns would let a brightness filter run and find nothing forever,
+    indistinguishable from a quiet sky; absent columns make the same filter
+    fail loudly, naming the column.
+    """
+    assert "candidate.magpsf" not in matches.columns  # what make_matches builds
+    hosts = nearest_hosts(matches, ["desi_dr1"], min_redshift=TEST_MIN_REDSHIFT)
+
+    with caplog.at_level(logging.WARNING):
+        placed = attach_distances(matches, hosts)
+
+    for column in ABS_MAG_COLUMNS:
+        assert column not in placed.columns
+    assert "candidate.magpsf" in caplog.text
 
 
 def test_attach_distances_drops_alerts_without_a_host() -> None:

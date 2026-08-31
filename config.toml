@@ -63,10 +63,26 @@ min_redshift = 0.0002
 # for one reason; each has its own Slack message. They are siblings, so one
 # finding nothing does not stop the others.
 #
-# `enabled` is how one config runs the hourly search and another the nightly
-# one -- see "Scheduled runs" in the README. Every filter is on unless a
-# config says otherwise.
+# Filters come in two kinds. Cut filters are JSON files in the directory below,
+# one file per filter -- drop one in and the next run picks it up; see the
+# shipped filters/luminous.json and filters/nearby.json, and the grammar in
+# desi_aap.stages.cut_filter. Code filters, which measure something (the GW
+# localization match below), are Python modules with their own section here.
+#
+# Which filters a run skips is how one config runs the hourly search and
+# another the nightly one -- see "Scheduled runs" in the README. Every filter
+# is on unless a config says otherwise.
 # ===========================================================================
+
+[filters]
+# Where the JSON filter definitions live. Relative, like output_dir, so it
+# follows the working directory; the shipped definitions are in the repo.
+dir = "filters"
+# Filters to skip this run, by name -- a JSON filter's filename without .json,
+# or a code filter's stage name. This is the knob the cadence overlays turn,
+# since JSON does not ride the --config merge: e.g. an hourly overlay sets
+# disabled = ["luminous", "nearby"] and leaves the nightly sweep to run them.
+disabled = []
 
 # ---------------------------------------------------------------------------
 # Filter: localize -- alerts consistent with a GW event localization. Kept if

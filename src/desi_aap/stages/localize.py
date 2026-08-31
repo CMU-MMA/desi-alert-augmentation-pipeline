@@ -165,7 +165,7 @@ def alerts_to_gw_match_input(
         raise KeyError(
             f"Alert frame is missing {', '.join(repr(c) for c in missing)}, so stage {STAGE!r} "
             f"cannot place it. These columns come from stage {DISTANCE_STAGE!r}, which must run "
-            "first; see desi_aap.pipeline.STAGES."
+            "first; see desi_aap.pipeline.stages_for."
         )
 
     frame = pd.DataFrame(index=alerts.index)

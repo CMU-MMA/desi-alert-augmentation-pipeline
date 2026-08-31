@@ -25,12 +25,13 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from types import ModuleType
 
 from desi_aap.config import PipelineConfig
-from desi_aap.stages import crossmatch, distance, localize, query, slack_publish
+from desi_aap.stages import crossmatch, distance, query, slack_publish
 from desi_aap.stages.base import StageInputs, StageResult
-from desi_aap.stages.filters import FILTER_STAGES
+from desi_aap.stages.filters import filter_descriptors
 from desi_aap.utils import run_stamp
 
 logger = logging.getLogger(__name__)
@@ -62,10 +63,14 @@ class StageSpec:
     name: str
     run: Callable[..., StageResult]
     requires: tuple[str, ...] = field(default=())
+    # Whether this run's config leaves the stage switched on. Resolved when the
+    # spec is built (see desi_aap.stages.filters.FilterDescriptor.enabled for
+    # who decides), so by here it is a plain fact rather than a lookup rule.
+    enabled: bool = True
 
 
 def _spec(module: ModuleType, run: Callable[..., StageResult]) -> StageSpec:
-    """Build a stage's entry from what the stage module itself declares.
+    """Build a data stage's entry from what the stage module itself declares.
 
     The name and the dependencies are read off the module rather than restated
     here, because the module is where they are already used: ``STAGE`` names its
@@ -77,54 +82,57 @@ def _spec(module: ModuleType, run: Callable[..., StageResult]) -> StageSpec:
     return StageSpec(module.STAGE, run, requires=module.REQUIRES)
 
 
-# Every stage the pipeline knows about, in the order they must run. The filters
-# are listed by desi_aap.stages.filters; a new one goes there and gets an entry
-# here, before slack_publish, which announces them all.
-STAGES: tuple[StageSpec, ...] = (
+# The stages every run has, in order, up to the fan-out. The filters come from
+# the config -- see stages_for -- so they cannot be listed here.
+DATA_STAGES: tuple[StageSpec, ...] = (
     _spec(query, query.run_query),
     _spec(crossmatch, crossmatch.run_crossmatch),
     _spec(distance, distance.run_distance),
-    _spec(localize, localize.run_localize),
-    _spec(slack_publish, slack_publish.run_slack_publish),
 )
 
-# The stage names, in order. Kept as a plain list because it is what the command
-# line prints and validates against.
-STAGE_ORDER = [spec.name for spec in STAGES]
 
-STAGE_SPECS: dict[str, StageSpec] = {spec.name: spec for spec in STAGES}
+def stages_for(cfg: PipelineConfig) -> tuple[StageSpec, ...]:
+    """Every stage of this run, in the order they must run.
 
-
-def stage_enabled(cfg: PipelineConfig, stage: str) -> bool:
-    """Whether the config leaves a stage switched on.
-
-    A *filter* carries ``enabled`` in its own section so that one config can run
-    the hourly search and another the nightly one, without either needing to
-    know what the other turns off. Only the filters do: the data stages every
-    filter depends on have nothing to gain from being switched off, and
-    ``slack_publish`` is already silenced by leaving ``[slack]`` out.
-
-    Read through ``getattr`` rather than a lookup table so that a section with
-    no such setting -- ``[query]``, ``[crossmatch]`` -- and a stage whose
-    section is not named after it -- ``slack_publish``, configured under
-    ``[slack]`` -- are both simply always on. Writing ``enabled`` into one of
-    those sections is a config error rather than a silent no-op, since
-    :class:`~desi_aap.config._Section` forbids unknown keys.
+    A function of the config rather than a module constant, because the filters
+    are: each JSON file in the configured filters directory is a stage of its
+    own, so what the pipeline *is* cannot be known before the config is read.
 
     Parameters
     ----------
     cfg : desi_aap.config.PipelineConfig
-        The configuration for this run.
-    stage : str
-        The stage's name.
+        The configuration whose pipeline is wanted.
 
     Returns
     -------
-    bool
-        False only when a section named after the stage exists and sets
-        ``enabled = false``.
+    tuple of StageSpec
+        The data stages, then every filter (code and JSON alike, disabled ones
+        included so their skip is recorded), then ``slack_publish``, which
+        requires them all.
+
+    Raises
+    ------
+    desi_aap.config.ConfigError
+        If a filter file is malformed or misnamed; see
+        :func:`desi_aap.stages.cut_filter.load_cut_filters`.
     """
-    return bool(getattr(getattr(cfg, stage, None), "enabled", True))
+    filters = filter_descriptors(cfg)
+    filter_specs = tuple(StageSpec(d.stage, d.run, requires=d.requires, enabled=d.enabled) for d in filters)
+    # The descriptors are bound into the announcing stage rather than re-read
+    # when it runs, so the filters a run announces are exactly the filters it
+    # was built from: a JSON file edited or deleted mid-run changes the next
+    # run, never the tail of this one.
+    announce = StageSpec(
+        slack_publish.STAGE,
+        partial(slack_publish.run_slack_publish, descriptors=filters),
+        requires=tuple(d.stage for d in filters),
+    )
+    return (*DATA_STAGES, *filter_specs, announce)
+
+
+def stage_order(cfg: PipelineConfig) -> list[str]:
+    """The stage names of :func:`stages_for`, in order."""
+    return [spec.name for spec in stages_for(cfg)]
 
 
 def _has_input(spec: StageSpec, results: StageInputs) -> bool:
@@ -206,15 +214,21 @@ def run_pipeline(
     from desi_aap import __version__
 
     stamp = stamp or run_stamp()
-    if start is not None and start not in STAGE_SPECS:
-        raise ValueError(f"Unknown stage {start!r}. Stages, in order: {', '.join(STAGE_ORDER)}.")
-    specs = STAGES if start is None else STAGES[STAGE_ORDER.index(start) :]
+    stages = stages_for(cfg)
+    order = [spec.name for spec in stages]
+    if start is not None and start not in order:
+        raise ValueError(f"Unknown stage {start!r}. Stages, in order: {', '.join(order)}.")
+    specs = stages if start is None else stages[order.index(start) :]
+    # The filters are the stages between the shared data stages and the
+    # announcement -- read off the list just built, not the disk again.
+    data = {spec.name for spec in DATA_STAGES}
+    filters = [name for name in order if name not in data and name != slack_publish.STAGE]
 
     logger.info("----- DESI Alert Augmentation Pipeline -----")
     logger.info("desi_aap version : %s", __version__)
     logger.info("Output directory : %s", cfg.run.output_dir)
     logger.info("Stages           : %s", ", ".join(spec.name for spec in specs))
-    logger.info("Filters          : %s", ", ".join(FILTER_STAGES))
+    logger.info("Filters          : %s", ", ".join(filters) if filters else "(none configured)")
     logger.info("Run timestamp    : %s", stamp)
     if start is not None:
         logger.info("Starting from    : %s, earlier stages fed from supplied inputs", start)
@@ -228,7 +242,7 @@ def run_pipeline(
     total_started = time.perf_counter()
 
     for spec in specs:
-        if not stage_enabled(cfg, spec.name):
+        if not spec.enabled:
             logger.info("[%s] switched off in the config; skipping.\n", spec.name)
             results[spec.name] = StageResult(stage=spec.name, stamp=stamp, summary={"skipped": "disabled"})
             continue

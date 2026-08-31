@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 from astropy import units as u
 
+from desi_aap.boom import ALERT_MAG_COLUMN
 from desi_aap.config import PipelineConfig
 from desi_aap.cosmology import COSMOLOGIES
 from desi_aap.stages.base import StageInputs, StageResult, input_result, write_frame
@@ -79,6 +80,30 @@ def dist_column(label: str) -> str:
 
 # Every distance column this stage writes, one per configured cosmology.
 DIST_COLUMNS = tuple(dist_column(label) for label in COSMOLOGIES)
+
+
+def abs_mag_column(label: str) -> str:
+    """Name of the absolute-magnitude column for one cosmology.
+
+    Parameters
+    ----------
+    label : str
+        A key of :data:`desi_aap.cosmology.COSMOLOGIES`, such as ``"SHOES"``.
+
+    Returns
+    -------
+    str
+        The column name, such as ``"abs_mag_SHOES"``.
+    """
+    return f"abs_mag_{label}"
+
+
+# Every absolute-magnitude column this stage writes, one per cosmology, from
+# the alert's apparent magnitude at that cosmology's luminosity distance. No
+# K-correction and no extinction: this is the screening number the filters cut
+# on, not a measurement to publish. Band-agnostic for the same reason -- the
+# band is carried beside it for whoever wants to be more careful.
+ABS_MAG_COLUMNS = tuple(abs_mag_column(label) for label in COSMOLOGIES)
 
 
 def _host_fields(matches: npd.NestedFrame, name: str, fields: Sequence[str]) -> pd.DataFrame:
@@ -225,7 +250,7 @@ def nearest_hosts(
 
 
 def attach_distances(matches: npd.NestedFrame, hosts: pd.DataFrame) -> npd.NestedFrame:
-    """Put the chosen host and its luminosity distances onto each alert row.
+    """Put the chosen host, its distances, and the implied brightness on each alert row.
 
     Every cosmology in :data:`desi_aap.cosmology.COSMOLOGIES` gets its own
     column rather than one being chosen here, because the choice belongs to
@@ -233,6 +258,16 @@ def attach_distances(matches: npd.NestedFrame, hosts: pd.DataFrame) -> npd.Neste
     in turn, while a magnitude or distance limit names the one it means. Two
     columns of the same redshift are cheap; a distance silently computed under
     the wrong cosmology is not.
+
+    The absolute magnitude is the distance modulus applied to the alert's
+    apparent PSF magnitude, ``M = m - 5 (log10(d_Mpc) + 5)`` -- no K-correction
+    and no extinction, so it is a screening number rather than a measurement.
+    It lives here rather than in any filter for the same reason the distance
+    does: every filter that cuts on brightness must mean the same brightness.
+    An alert with no usable apparent magnitude gets ``NaN``, which fails every
+    cut downstream rather than raising; a frame with no magnitude *column* gets
+    no absolute-magnitude columns at all, so a brightness filter fails loudly
+    instead of running quiet forever.
 
     Parameters
     ----------
@@ -245,21 +280,44 @@ def attach_distances(matches: npd.NestedFrame, hosts: pd.DataFrame) -> npd.Neste
     -------
     nested_pandas.NestedFrame
         The alerts that had a usable host, in their original order, with
-        :data:`HOST_COLUMNS` and :data:`DIST_COLUMNS` added. The join is an inner
-        one, so an alert absent from ``hosts`` is dropped: it has no redshift, so
-        no distance, and nothing downstream could place it. Empty NestedFrame
-        carrying those columns if no alert had a host.
+        :data:`HOST_COLUMNS`, :data:`DIST_COLUMNS` and :data:`ABS_MAG_COLUMNS`
+        added. The join is an inner one, so an alert absent from ``hosts`` is
+        dropped: it has no redshift, so no distance, and nothing downstream
+        could place it. Empty NestedFrame carrying those columns if no alert
+        had a host.
     """
     joined = npd.NestedFrame(matches.join(hosts, how="inner"))
+    # A frame with no magnitude column still gets its distances, but no
+    # absolute magnitudes AT ALL -- absent columns rather than all-NaN ones.
+    # All-NaN columns would let a brightness filter run and find nothing,
+    # forever, looking exactly like a quiet sky; absent columns make the same
+    # filter fail loudly, naming the column, while filters that never cut on
+    # brightness are unaffected.
+    has_apparent = ALERT_MAG_COLUMN in joined.columns
+    if not has_apparent:
+        logger.warning(
+            "Alert frame has no %r column, so no absolute magnitudes are computed. "
+            "Any filter cutting on abs_mag_* will fail; check the projection in "
+            "default_pipeline.json.",
+            ALERT_MAG_COLUMN,
+        )
+    else:
+        apparent = pd.to_numeric(joined[ALERT_MAG_COLUMN], errors="coerce").astype(float).to_numpy()
 
     for label, cosmo in COSMOLOGIES.items():
-        column = dist_column(label)
         if joined.empty:
             # astropy's luminosity_distance goes through np.vectorize, which
             # rejects a size-0 input rather than returning an empty result.
-            joined[column] = np.array([], dtype=float)
+            joined[dist_column(label)] = np.array([], dtype=float)
+            if has_apparent:
+                joined[abs_mag_column(label)] = np.array([], dtype=float)
             continue
-        joined[column] = cosmo.luminosity_distance(joined["host_redshift"].to_numpy()).to_value(u.Mpc)
+        dist_mpc = cosmo.luminosity_distance(joined["host_redshift"].to_numpy()).to_value(u.Mpc)
+        joined[dist_column(label)] = dist_mpc
+        if has_apparent:
+            # The distance modulus, with the distance converted from Mpc to
+            # the 10 pc the magnitude scale is defined against.
+            joined[abs_mag_column(label)] = apparent - 5 * (np.log10(dist_mpc) + 5)
 
     return joined
 

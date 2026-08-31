@@ -211,6 +211,29 @@ class SlackConfig(_Section):
     max_rows: int = Field(default=20, ge=1, le=99)
 
 
+class FiltersConfig(_Section):
+    """The ``[filters]`` section: where the JSON filter definitions live.
+
+    Each ``<name>.json`` in ``dir`` defines one cut filter -- see
+    :mod:`desi_aap.stages.cut_filter` for the file's grammar -- and becomes its
+    own pipeline stage, with its own output directory and its own Slack
+    message. Adding a filter is dropping a file in; nothing else changes.
+    """
+
+    # Relative, like output_dir, so a fresh clone works anywhere: it follows
+    # the working directory, and the caveats under "Scheduled runs" in the
+    # README apply. A dir that does not exist simply contributes no filters,
+    # so a clone that deletes the shipped definitions still runs -- unless the
+    # path was set explicitly, in which case a missing dir is an error rather
+    # than a silently filter-less pipeline (see stages.cut_filter.load_cut_filters).
+    dir: Path = Path("filters")
+    # JSON filters to skip this run, by name. Here rather than in the JSON
+    # files because this is what the cadence overlays toggle, and only TOML
+    # rides the --config merge: hourly.toml can disable the nightly sweep's
+    # filters without editing any JSON.
+    disabled: list[str] = []
+
+
 class QueryConfig(_Section):
     """The ``[query]`` section: what that stage queries, and over what window."""
 
@@ -247,6 +270,7 @@ class PipelineConfig(_Section):
     # search was. A config that says nothing about it still gets usable distances.
     distance: DistanceConfig = DistanceConfig()
     localize: LocalizeConfig
+    filters: FiltersConfig = FiltersConfig()
     dask: DaskConfig = DaskConfig()
     gracedb: GraceDbConfig = GraceDbConfig()
     # Optional, unlike the sections above: a fresh clone has no Slack app or

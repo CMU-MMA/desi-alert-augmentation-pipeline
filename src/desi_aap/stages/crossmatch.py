@@ -36,7 +36,7 @@ STAGE = "crossmatch"
 # Stages whose output this one consumes. Declared beside the stage rather
 # than in the pipeline registry so that what the stage reads and what the
 # pipeline thinks it reads cannot drift apart: input_result is called with
-# these names, and desi_aap.pipeline.STAGES takes its `requires` from here.
+# these names, and desi_aap.pipeline.stages_for takes its `requires` from here.
 REQUIRES: tuple[str, ...] = (QUERY_STAGE,)
 
 # Prefix of the parquet file this stage writes.

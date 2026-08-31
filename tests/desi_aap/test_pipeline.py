@@ -3,6 +3,7 @@
 import pytest
 
 from desi_aap import boom, pipeline
+from desi_aap.config import ConfigError
 from desi_aap.stages.base import StageResult
 from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
 from desi_aap.stages.distance import STAGE as DISTANCE_STAGE
@@ -36,7 +37,7 @@ def test_run_from_a_stage_skips_the_earlier_ones(
 
 
 def test_an_unknown_start_stage_names_the_real_ones(pipeline_config):
-    with pytest.raises(ValueError, match=", ".join(pipeline.STAGE_ORDER)):
+    with pytest.raises(ValueError, match=", ".join(pipeline.stage_order(pipeline_config))):
         pipeline.run_pipeline(pipeline_config, start="does_not_exist")
 
 
@@ -59,7 +60,7 @@ def test_an_empty_stage_skips_what_needs_it_instead_of_ending_the_run(
     results = pipeline.run_pipeline(pipeline_config)
 
     # Every stage has a result, including the ones that never ran.
-    assert set(results) == set(pipeline.STAGE_ORDER)
+    assert set(results) == set(pipeline.stage_order(pipeline_config))
     assert results[QUERY_STAGE].is_empty
     for stage in (CROSSMATCH_STAGE, DISTANCE_STAGE, LOCALIZE_STAGE, SLACK_STAGE):
         assert results[stage].summary["skipped"] == "no input", stage
@@ -99,9 +100,66 @@ def test_one_empty_input_does_not_skip_a_stage_that_has_another(gold_standard_al
     assert pipeline._has_input(spec, {})
 
 
-def test_every_stage_requires_one_that_runs_before_it():
+def test_every_stage_requires_one_that_runs_before_it(pipeline_config):
     """The registry is a DAG in the order it is written, not just a list."""
     seen: set[str] = set()
-    for spec in pipeline.STAGES:
+    for spec in pipeline.stages_for(pipeline_config):
         assert set(spec.requires) <= seen, f"{spec.name} requires a stage that has not run"
         seen.add(spec.name)
+
+
+def test_a_json_filter_becomes_a_stage(pipeline_config):
+    """The filter API's contract: drop a file in the directory, get a stage.
+
+    Between distance and slack_publish, requiring the former and required by
+    the latter, so its candidates are announced like any code filter's.
+    """
+    (pipeline_config.filters.dir / "shiny.json").write_text(
+        '{"cuts": [{"column": "dist_mpc_SHOES", "max": 100}]}'
+    )
+
+    order = pipeline.stage_order(pipeline_config)
+    specs = {spec.name: spec for spec in pipeline.stages_for(pipeline_config)}
+
+    assert order.index(DISTANCE_STAGE) < order.index("shiny") < order.index(SLACK_STAGE)
+    assert specs["shiny"].requires == (DISTANCE_STAGE,)
+    assert "shiny" in specs[SLACK_STAGE].requires
+    assert specs["shiny"].enabled
+
+
+def test_a_disabled_json_filter_is_skipped_like_any_other(
+    pipeline_config, gold_standard_alerts, broker_must_not_be_called
+):
+    """[filters] disabled is the cadence knob for JSON filters, as enabled is for code ones."""
+    (pipeline_config.filters.dir / "shiny.json").write_text(
+        '{"cuts": [{"column": "dist_mpc_SHOES", "max": 100}]}'
+    )
+    cfg = pipeline_config.model_copy(
+        update={"filters": pipeline_config.filters.model_copy(update={"disabled": ["shiny"]})}
+    )
+    supplied = StageResult(stage=DISTANCE_STAGE, frame=gold_standard_alerts)
+
+    results = pipeline.run_pipeline(cfg, start="shiny", inputs={DISTANCE_STAGE: supplied})
+
+    assert results["shiny"].summary["skipped"] == "disabled"
+
+
+def test_the_disabled_list_switches_off_a_code_filter_too(pipeline_config):
+    """One knob turns any filter off: [filters] disabled works beyond the JSON ones."""
+    cfg = pipeline_config.model_copy(
+        update={"filters": pipeline_config.filters.model_copy(update={"disabled": [LOCALIZE_STAGE]})}
+    )
+
+    specs = {spec.name: spec for spec in pipeline.stages_for(cfg)}
+
+    assert not specs[LOCALIZE_STAGE].enabled
+
+
+def test_disabling_a_filter_that_does_not_exist_is_an_error(pipeline_config):
+    """A typo in [filters] disabled must not leave the real filter running."""
+    cfg = pipeline_config.model_copy(
+        update={"filters": pipeline_config.filters.model_copy(update={"disabled": ["lumnious"]})}
+    )
+
+    with pytest.raises(ConfigError, match="lumnious"):
+        pipeline.stages_for(cfg)
