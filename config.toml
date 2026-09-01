@@ -100,6 +100,9 @@ min_redshift = 0.0002
 # channel = "#desi-alerts"
 # # Candidates listed in the message before it cuts off.
 # max_rows = 20
+# # Columns the message's table shows, in this order; one the results lack is
+# # skipped. A match-count column per crossmatched catalog is always appended.
+# columns = ["objectId", "candidate.ra", "candidate.dec"]
 
 # ===========================================================================
 # GraceDB -- superevent metadata and skymap cache.

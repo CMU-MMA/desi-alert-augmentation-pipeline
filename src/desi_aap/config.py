@@ -186,6 +186,10 @@ class SlackConfig(_Section):
     # How many candidates the message lists before cutting off. At most 99:
     # Slack's table block holds 100 rows, and the header takes one.
     max_rows: int = Field(default=20, ge=1, le=99)
+    # Columns the message's table shows, in this order, skipping any the
+    # frame lacks. A match-count column per crossmatched catalog is always
+    # appended; those are computed, not columns of the frame.
+    columns: list[str] = ["objectId", "candidate.ra", "candidate.dec"]
 
 
 class QueryConfig(_Section):

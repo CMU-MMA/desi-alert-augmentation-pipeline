@@ -101,6 +101,7 @@ recheck_window = "30d"
 credentials = "~/.config/desi_aap/slack.toml"
 channel = "#desi-alerts"
 max_rows = 20
+columns = ["objectId", "candidate.ra", "candidate.dec"]
 ```
 
 Everything else is a property of one invocation rather than of the pipeline's
@@ -192,8 +193,8 @@ cache_dir = "/ocean/projects/phy250012p/shared/3DTS/gracedb_cache"
 
 The `slack_publish` stage posts each run's candidates to a channel: a header
 naming the run, how many candidates it found, the first `max_rows` of them
-with their coordinates and per-catalog match counts, and the path to the
-full parquet output. The
+as a table of the configured `columns` plus per-catalog match counts, and
+the path to the full parquet output. The
 pipeline stops before this stage when an earlier one produces no rows, so a
 run with nothing to report posts nothing.
 

@@ -40,9 +40,6 @@ STAGE = "slack_publish"
 # and this one, point this at the new last data stage.
 INPUT_STAGE = CROSSMATCH_STAGE
 
-# Flat columns the table shows, in order, skipping any the frame lacks.
-DISPLAY_COLUMNS = ["objectId", "candidate.ra", "candidate.dec"]
-
 
 def load_bot_token(path: Path) -> str:
     """Read the Slack bot token from a TOML credentials file.
@@ -101,7 +98,7 @@ def _match_columns(frame: npd.NestedFrame) -> list[str]:
     ]
 
 
-def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
+def format_message(result: StageResult, max_rows: int, display_columns: list[str]) -> dict[str, Any]:
     """Render a stage's non-empty frame as one Slack message.
 
     Parameters
@@ -111,6 +108,10 @@ def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
         message also names its ``stamp`` and, when set, its ``output_path``.
     max_rows : int
         How many rows the table lists before cutting off.
+    display_columns : list of str
+        Columns the table shows, in this order, normally ``[slack].columns``
+        from the config. A name the frame lacks is skipped, with a warning. A
+        match-count column per crossmatched catalog is always appended.
 
     Returns
     -------
@@ -127,13 +128,17 @@ def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
     found = f"{n_rows} candidate{'' if n_rows == 1 else 's'} found"
     cutoff = f". Showing the first {max_rows}:" if n_rows > max_rows else ":"
 
+    missing = [name for name in display_columns if name not in frame.columns]
+    if missing:
+        logger.warning("Configured [slack] column(s) not in the frame, skipping: %s", ", ".join(missing))
+
     # Each column is (name, its cells as strings, whether it right-aligns).
     # Measures right-align like numbers; the integer identifiers stay left,
     # like labels.
     shown = frame.head(max_rows)
     columns = [
         (name, [_format_cell(value) for value in shown[name]], shown[name].dtype.kind == "f")
-        for name in DISPLAY_COLUMNS
+        for name in display_columns
         if name in frame.columns
     ]
     # Each catalog's column shows how many of its sources matched the alert.
@@ -258,7 +263,7 @@ def run_slack_publish(
         logger.info("No rows to publish; posting nothing.")
         return result
 
-    message = format_message(upstream, cfg.slack.max_rows)
+    message = format_message(upstream, cfg.slack.max_rows, cfg.slack.columns)
     if dry_run:
         logger.info(
             "Dry run: not posting to Slack. %s Blocks payload:\n%s",

@@ -19,6 +19,7 @@ from desi_aap.stages.slack_publish import (
 )
 
 STAMP = "20260807T120000Z"
+DEFAULT_COLUMNS = ["objectId", "candidate.ra", "candidate.dec"]
 
 
 @pytest.fixture
@@ -77,7 +78,7 @@ def test_run_posts_the_matches(slack_config, match_inputs, posted):
 
 
 def test_the_message_lists_rows_and_cuts_off(matches):
-    message = format_message(matches, max_rows=5)
+    message = format_message(matches, max_rows=5, display_columns=DEFAULT_COLUMNS)
 
     section, table = message["blocks"][:2]
     assert "8 candidates found. Showing the first 5:" in section["text"]["text"]
@@ -92,7 +93,7 @@ def test_the_message_lists_rows_and_cuts_off(matches):
 
 
 def test_a_short_message_has_no_cutoff_line(matches):
-    message = format_message(matches, max_rows=20)
+    message = format_message(matches, max_rows=20, display_columns=DEFAULT_COLUMNS)
 
     section, table = message["blocks"][:2]
     assert "8 candidates found:" in section["text"]["text"]
@@ -110,12 +111,39 @@ def test_the_message_names_the_output_file(matches, tmp_path):
         summary=matches.summary,
     )
 
-    context = format_message(with_path, max_rows=5)["blocks"][-1]
+    context = format_message(with_path, max_rows=5, display_columns=DEFAULT_COLUMNS)["blocks"][-1]
     assert context["type"] == "context"
     assert f"Full results: `{written}`" in context["elements"][0]["text"]
     # The dry-run result wrote nothing, so there is no path to point at.
-    blocks = format_message(matches, max_rows=5)["blocks"]
+    blocks = format_message(matches, max_rows=5, display_columns=DEFAULT_COLUMNS)["blocks"]
     assert all(block["type"] != "context" for block in blocks)
+
+
+def test_configured_columns_choose_and_order_the_table(matches):
+    message = format_message(matches, max_rows=5, display_columns=["candidate.dec", "objectId"])
+
+    rows = message["blocks"][1]["rows"]
+    assert [cell["text"] for cell in rows[0]] == ["candidate.dec", "objectId", "desi_dr1"]
+
+
+def test_a_configured_column_the_frame_lacks_warns_and_is_skipped(matches, caplog):
+    with caplog.at_level(logging.WARNING):
+        message = format_message(matches, max_rows=5, display_columns=["objectId", "no_such_column"])
+
+    assert "no_such_column" in caplog.text
+    rows = message["blocks"][1]["rows"]
+    assert [cell["text"] for cell in rows[0]] == ["objectId", "desi_dr1"]
+
+
+def test_run_uses_the_configured_columns(slack_config, match_inputs, posted):
+    narrowed = slack_config.slack.model_copy(update={"columns": ["objectId"]})
+    cfg = slack_config.model_copy(update={"slack": narrowed})
+
+    run_slack_publish(cfg, inputs=match_inputs, stamp=STAMP)
+
+    (call,) = posted
+    header_row = call["blocks"][1]["rows"][0]
+    assert [cell["text"] for cell in header_row] == ["objectId", "desi_dr1"]
 
 
 def test_no_slack_section_skips(pipeline_config, match_inputs, posted, caplog):
