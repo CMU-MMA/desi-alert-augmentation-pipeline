@@ -137,7 +137,19 @@ def test_a_configured_column_the_frame_lacks_warns_and_is_skipped(matches, caplo
     assert [cell["text"] for cell in rows[0]] == ["objectId"]
 
 
-def test_a_nested_field_lists_each_rows_values_in_one_cell(matches):
+def _lines(cell):
+    """The lines of a rich_text cell, each as (text, bold)."""
+    assert cell["type"] == "rich_text"
+    return [
+        (
+            "".join(el["text"] for el in section["elements"]),
+            any(el.get("style", {}).get("bold") for el in section["elements"]),
+        )
+        for section in cell["elements"]
+    ]
+
+
+def test_a_nested_field_lists_each_rows_values_one_per_line(matches):
     # lspsc has three sources per alert; desi_dr1 one match per alert.
     message = format_message(matches, max_rows=2, display_columns=["lspsc.ra", "desi_dr1.Z"])
 
@@ -145,29 +157,36 @@ def test_a_nested_field_lists_each_rows_values_in_one_cell(matches):
     (header, first, second) = table["rows"]
     assert [cell["text"] for cell in header] == ["lspsc.ra", "desi_dr1.Z"]
     frame = matches.frame
-    expected_ra = ", ".join(f"{ra:.4f}" for ra in frame["lspsc"].iloc[0]["ra"])
-    assert first[0]["text"] == expected_ra
-    assert first[1]["text"] == f"{frame['desi_dr1'].iloc[0]['Z'].iloc[0]:.4f}"
-    assert second[1]["text"] == f"{frame['desi_dr1'].iloc[1]['Z'].iloc[0]:.4f}"
-    assert [setting["align"] for setting in table["column_settings"]] == ["right", "right"]
+    assert _lines(first[0]) == [(f"{ra:.4f}", False) for ra in frame["lspsc"].iloc[0]["ra"]]
+    assert _lines(first[1]) == [(f"{frame['desi_dr1'].iloc[0]['Z'].iloc[0]:.4f}", False)]
+    assert _lines(second[1]) == [(f"{frame['desi_dr1'].iloc[1]['Z'].iloc[0]:.4f}", False)]
+    # Wrapped, so every line shows; right-aligned, like the numbers they are.
+    assert table["column_settings"] == [{"align": "right", "is_wrapped": True}] * 2
 
 
-def test_a_whole_nested_column_lists_each_sub_row_as_field_value_pairs(matches):
+def test_a_whole_nested_column_lists_sub_rows_under_a_header_line(matches):
     message = format_message(matches, max_rows=1, display_columns=["objectId", "lspsc"])
 
     table = message["blocks"][1]
     (header, row) = table["rows"]
     assert [cell["text"] for cell in header] == ["objectId", "lspsc"]
+    assert row[0]["type"] == "raw_text"
     sub = matches.frame["lspsc"].iloc[0]
-    entries = row[1]["text"].split("; ")
-    assert len(entries) == len(sub)
-    assert entries[0].startswith(f"_id={sub['_id'].iloc[0]}, ra={sub['ra'].iloc[0]:.4f}")
-    assert [setting["align"] for setting in table["column_settings"]] == ["left", "left"]
+    lines = _lines(row[1])
+    assert lines[0] == ("_id, ra, dec, mag_white, score, distance_arcsec", True)
+    assert len(lines) == 1 + len(sub)
+    first_source = next(sub.itertuples(index=False))
+    assert lines[1] == (
+        ", ".join(f"{v:.4f}" if isinstance(v, float) else str(v) for v in first_source),
+        False,
+    )
+    assert lines[1][0].startswith(f"{sub['_id'].iloc[0]}, {sub['ra'].iloc[0]:.4f}")
+    assert table["column_settings"] == [{"align": "left"}, {"align": "left", "is_wrapped": True}]
 
 
 def test_a_row_with_no_sub_rows_gets_an_empty_cell(matches):
     frame = matches.frame.copy()
-    # Empty the first alert's DESI matches while leaving the column nested.
+    # Empty every alert's DESI matches while leaving the column nested.
     frame = frame.query("desi_dr1.Z < 0")
     assert len(frame) == len(matches.frame)
     emptied = StageResult(stage=matches.stage, frame=frame, stamp=matches.stamp, summary=matches.summary)
@@ -175,7 +194,7 @@ def test_a_row_with_no_sub_rows_gets_an_empty_cell(matches):
     message = format_message(emptied, max_rows=1, display_columns=["desi_dr1.Z", "desi_dr1"])
 
     (_, row) = message["blocks"][1]["rows"]
-    assert [cell["text"] for cell in row] == ["", ""]
+    assert row == [{"type": "raw_text", "text": ""}] * 2
 
 
 def test_run_uses_the_configured_columns(slack_config, match_inputs, posted):

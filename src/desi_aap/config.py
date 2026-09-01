@@ -188,7 +188,7 @@ class SlackConfig(_Section):
     max_rows: int = Field(default=20, ge=1, le=99)
     # Columns the message's table shows, in this order, skipping any the
     # frame lacks. A nested column, or a `nested.field` path into one, shows
-    # the row's sub-rows in a single cell.
+    # the row's sub-rows one per line in a single cell.
     columns: list[str] = ["objectId", "candidate.ra", "candidate.dec"]
 
 

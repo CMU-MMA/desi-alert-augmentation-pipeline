@@ -85,47 +85,80 @@ def _format_cell(value: object) -> str:
     return str(value)
 
 
-def _format_record(record: dict[str, object]) -> str:
-    """Render one nested sub-row as ``field=value`` pairs."""
-    return ", ".join(f"{field}={_format_cell(value)}" for field, value in record.items())
+def _raw_cell(text: str) -> dict[str, Any]:
+    """A plain table cell."""
+    return {"type": "raw_text", "text": text}
 
 
-def _column_cells(shown: npd.NestedFrame, name: str) -> tuple[list[str], bool] | None:
+def _lines_cell(lines: list[str], header: str | None = None) -> dict[str, Any]:
+    """A table cell showing each line on its own, under an optional bold header.
+
+    A ``rich_text`` cell renders each of its sections as a line, which is
+    the documented way to get line breaks inside a table; a ``raw_text``
+    cell's handling of newlines is not. Empty, it falls back to a blank
+    plain cell, since a rich_text cell needs at least one section.
+    """
+    if not lines and header is None:
+        return _raw_cell("")
+    sections = []
+    if header is not None:
+        sections.append(
+            {
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": header, "style": {"bold": True}}],
+            }
+        )
+    sections += [
+        {"type": "rich_text_section", "elements": [{"type": "text", "text": line}]} for line in lines
+    ]
+    return {"type": "rich_text", "elements": sections}
+
+
+def _column_cells(shown: npd.NestedFrame, name: str) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
     """The cells of one configured column, one per row of ``shown``.
 
     A name resolves, in order, as a column of the frame -- flat, or nested,
-    in which case each cell lists the row's sub-rows as ``field=value``
-    pairs separated by semicolons -- or as a ``nested.field`` path, in
-    which case each cell lists that field's values for the row, separated
-    by commas. Checking the frame's own columns first keeps BOOM's flat
-    alert fields, whose names contain dots like ``candidate.ra``, working
-    as they are. A row with no sub-rows gets an empty cell.
+    in which case each cell lists the row's sub-rows one per line under a
+    bold header line naming the fields -- or as a ``nested.field`` path, in
+    which case each cell lists that field's values for the row, one per
+    line. Checking the frame's own columns first keeps BOOM's flat alert
+    fields, whose names contain dots like ``candidate.ra``, working as they
+    are. A row with no sub-rows gets an empty cell.
 
     Returns
     -------
-    tuple of (list of str, bool) or None
-        The cells and whether they right-align like numbers, or None when
-        the frame has no such column or field.
+    tuple of (list of dict, dict) or None
+        The Block Kit cells and the column's ``column_settings`` entry --
+        measures right-align like numbers, the integer identifiers stay
+        left like labels, and nested cells wrap so their lines show -- or
+        None when the frame has no such column or field.
     """
     if name in shown.columns:
         series = shown[name]
         if isinstance(series.dtype, npd.NestedDtype):
+            header = ", ".join(series.nest.columns)
             # Iterating a nested column yields each row's sub-rows as a
             # DataFrame, or None when it has none.
-            return [
-                "" if sub is None else "; ".join(_format_record(row) for row in sub.to_dict("records"))
+            cells = [
+                _raw_cell("")
+                if sub is None
+                else _lines_cell(
+                    [", ".join(_format_cell(v) for v in row) for row in sub.itertuples(index=False)], header
+                )
                 for sub in series
-            ], False
-        return [_format_cell(value) for value in series], series.dtype.kind == "f"
+            ]
+            return cells, {"align": "left", "is_wrapped": True}
+        align = "right" if series.dtype.kind == "f" else "left"
+        return [_raw_cell(_format_cell(value)) for value in series], {"align": align}
 
     nested, _, field = name.partition(".")
     if nested in shown.nested_columns and field in shown[nested].nest.columns:
-        numeric = shown[nested].nest[field].dtype.kind == "f"
+        align = "right" if shown[nested].nest[field].dtype.kind == "f" else "left"
         cells = [
-            "" if sub is None else ", ".join(_format_cell(value) for value in sub[field])
+            _lines_cell([] if sub is None else [_format_cell(value) for value in sub[field]])
             for sub in shown[nested]
         ]
-        return cells, numeric
+        return cells, {"align": align, "is_wrapped": True}
     return None
 
 
@@ -142,9 +175,9 @@ def format_message(result: StageResult, max_rows: int, display_columns: list[str
     display_columns : list of str
         Columns the table shows, in this order, normally ``[slack].columns``
         from the config. Each may be a flat column, a nested column, or a
-        ``nested.field`` path; the last two render the row's sub-rows in
-        one cell, as :func:`_column_cells` describes. A name the frame
-        lacks is skipped, with a warning.
+        ``nested.field`` path; the last two render the row's sub-rows as
+        lines of one cell, as :func:`_column_cells` describes. A name the
+        frame lacks is skipped, with a warning.
 
     Returns
     -------
@@ -161,9 +194,7 @@ def format_message(result: StageResult, max_rows: int, display_columns: list[str
     found = f"{n_rows} candidate{'' if n_rows == 1 else 's'} found"
     cutoff = f". Showing the first {max_rows}:" if n_rows > max_rows else ":"
 
-    # Each column is (name, its cells as strings, whether it right-aligns).
-    # Measures right-align like numbers; the integer identifiers stay left,
-    # like labels.
+    # Each column is (name, its Block Kit cells, its column_settings entry).
     shown = frame.head(max_rows)
     columns = []
     missing = []
@@ -176,18 +207,17 @@ def format_message(result: StageResult, max_rows: int, display_columns: list[str
     if missing:
         logger.warning("Configured [slack] column(s) not in the frame, skipping: %s", ", ".join(missing))
 
-    # Every cell is raw_text, holding our own formatting: as of 2026-08 Slack's
-    # validator rejects the raw_number cells its docs describe (it wants an
-    # undocumented `value` field), and a preformatted string renders the same.
-    header_row = [{"type": "raw_text", "text": name} for name, _, _ in columns]
-    value_rows = [
-        [{"type": "raw_text", "text": cells[i]} for _, cells, _ in columns] for i in range(len(shown))
-    ]
+    # Flat cells are raw_text holding our own formatting: as of 2026-08
+    # Slack's validator rejects the raw_number cells its docs describe (it
+    # wants an undocumented `value` field), and a preformatted string renders
+    # the same. Nested cells are rich_text, for their line breaks.
+    header_row = [_raw_cell(name) for name, _, _ in columns]
+    value_rows = [[cells[i] for _, cells, _ in columns] for i in range(len(shown))]
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*\n{found}{cutoff}"}},
         {
             "type": "table",
-            "column_settings": [{"align": "right" if numeric else "left"} for _, _, numeric in columns],
+            "column_settings": [settings for _, _, settings in columns],
             "rows": [header_row, *value_rows],
         },
     ]
