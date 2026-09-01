@@ -226,18 +226,18 @@ skipping, so a fresh clone runs with no Slack setup. To turn it on:
 way to preview the formatting before pointing it at a real channel.
 
 To exercise just this stage on known input, start the pipeline at it. Any
-previous run's matches file works, or build one from the committed test data
-(`python scripts/make_test_matches.py test_matches.parquet`, with `--rows` to
-tile it bigger):
+previous run's coincidences or matches file works, or build one from the
+committed test data (`python scripts/make_test_matches.py test_matches.parquet`,
+with `--rows` to tile it bigger):
 
 ```bash
 # Preview the message this file would produce, without posting:
 desi-aap run -c config.toml --from-stage slack_publish \
-             --input output/crossmatch/matches_<stamp>.parquet --dry-run
+             --input output/localize/coincidences_<stamp>.parquet --dry-run
 
 # Post it for real, once [slack] is configured:
 desi-aap run -c config.toml --from-stage slack_publish \
-             --input output/crossmatch/matches_<stamp>.parquet
+             --input output/localize/coincidences_<stamp>.parquet
 ```
 
 ## The localize stage

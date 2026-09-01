@@ -8,9 +8,9 @@ from slack_sdk.errors import SlackApiError
 from desi_aap.config import PipelineConfig, SlackConfig
 from desi_aap.stages import slack_publish
 from desi_aap.stages.base import StageResult
-from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
 from desi_aap.stages.crossmatch import run_crossmatch
 from desi_aap.stages.slack_publish import (
+    INPUT_STAGE,
     STAGE,
     format_message,
     load_bot_token,
@@ -39,15 +39,19 @@ def slack_config(pipeline_config, slack_credentials):
 
 @pytest.fixture
 def matches(pipeline_config, gold_standard_alerts):
-    """A real crossmatch result to publish, nested match column and all."""
+    """A real crossmatch result to publish, nested match column and all.
+
+    The stage reads whatever :data:`INPUT_STAGE` produced; a crossmatch
+    frame has the same shape and is cheap to build from the test data.
+    """
     inputs = {"query": StageResult(stage="query", frame=gold_standard_alerts)}
     return run_crossmatch(pipeline_config, dry_run=True, inputs=inputs, stamp=STAMP)
 
 
 @pytest.fixture
 def match_inputs(matches):
-    """What the crossmatch stage would have handed this one."""
-    return {CROSSMATCH_STAGE: matches}
+    """What the input stage would have handed this one."""
+    return {INPUT_STAGE: matches}
 
 
 @pytest.fixture
@@ -260,7 +264,7 @@ def test_dry_run_logs_the_message_without_posting(slack_config, match_inputs, po
 
 
 def test_an_empty_upstream_posts_nothing(slack_config, posted):
-    empty = {CROSSMATCH_STAGE: StageResult(stage=CROSSMATCH_STAGE, frame=None)}
+    empty = {INPUT_STAGE: StageResult(stage=INPUT_STAGE, frame=None)}
     result = run_slack_publish(slack_config, inputs=empty, stamp=STAMP)
 
     assert posted == []
@@ -268,7 +272,7 @@ def test_an_empty_upstream_posts_nothing(slack_config, posted):
 
 
 def test_a_missing_upstream_names_the_stage_that_must_run_first(slack_config):
-    with pytest.raises(KeyError, match=CROSSMATCH_STAGE):
+    with pytest.raises(KeyError, match=INPUT_STAGE):
         run_slack_publish(slack_config, inputs=None, stamp=STAMP)
 
 

@@ -36,8 +36,9 @@ logger = logging.getLogger(__name__)
 
 STAGE = "slack_publish"
 
-# The stage whose frame gets published. As stages are added between crossmatch
-# and this one, point this at the new last data stage.
+# The stage whose frame gets published: the last data stage in
+# desi_aap.pipeline.STAGE_ORDER. As stages are added before this one, point
+# this at the new last data stage.
 INPUT_STAGE = LOCALIZE_STAGE
 
 
