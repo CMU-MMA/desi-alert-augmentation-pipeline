@@ -85,11 +85,11 @@ def test_the_message_lists_rows_and_cuts_off(matches):
     # One row per shown alert, plus the header row.
     rows = table["rows"]
     assert len(rows) == 6
-    assert [cell["text"] for cell in rows[0]] == ["objectId", "candidate.ra", "candidate.dec", "desi_dr1"]
+    assert [cell["text"] for cell in rows[0]] == ["objectId", "candidate.ra", "candidate.dec"]
     # Every cell is raw_text -- Slack rejects its documented raw_number shape --
     # with measures right-aligned per column instead.
     assert all(cell["type"] == "raw_text" for row in rows for cell in row)
-    assert [setting["align"] for setting in table["column_settings"]] == ["left", "right", "right", "right"]
+    assert [setting["align"] for setting in table["column_settings"]] == ["left", "right", "right"]
 
 
 def test_a_short_message_has_no_cutoff_line(matches):
@@ -123,16 +123,59 @@ def test_configured_columns_choose_and_order_the_table(matches):
     message = format_message(matches, max_rows=5, display_columns=["candidate.dec", "objectId"])
 
     rows = message["blocks"][1]["rows"]
-    assert [cell["text"] for cell in rows[0]] == ["candidate.dec", "objectId", "desi_dr1"]
+    assert [cell["text"] for cell in rows[0]] == ["candidate.dec", "objectId"]
 
 
 def test_a_configured_column_the_frame_lacks_warns_and_is_skipped(matches, caplog):
     with caplog.at_level(logging.WARNING):
-        message = format_message(matches, max_rows=5, display_columns=["objectId", "no_such_column"])
+        message = format_message(
+            matches, max_rows=5, display_columns=["objectId", "no_such_column", "desi_dr1.NO_SUCH_FIELD"]
+        )
 
-    assert "no_such_column" in caplog.text
+    assert "no_such_column, desi_dr1.NO_SUCH_FIELD" in caplog.text
     rows = message["blocks"][1]["rows"]
-    assert [cell["text"] for cell in rows[0]] == ["objectId", "desi_dr1"]
+    assert [cell["text"] for cell in rows[0]] == ["objectId"]
+
+
+def test_a_nested_field_lists_each_rows_values_in_one_cell(matches):
+    # lspsc has three sources per alert; desi_dr1 one match per alert.
+    message = format_message(matches, max_rows=2, display_columns=["lspsc.ra", "desi_dr1.Z"])
+
+    table = message["blocks"][1]
+    (header, first, second) = table["rows"]
+    assert [cell["text"] for cell in header] == ["lspsc.ra", "desi_dr1.Z"]
+    frame = matches.frame
+    expected_ra = ", ".join(f"{ra:.4f}" for ra in frame["lspsc"].iloc[0]["ra"])
+    assert first[0]["text"] == expected_ra
+    assert first[1]["text"] == f"{frame['desi_dr1'].iloc[0]['Z'].iloc[0]:.4f}"
+    assert second[1]["text"] == f"{frame['desi_dr1'].iloc[1]['Z'].iloc[0]:.4f}"
+    assert [setting["align"] for setting in table["column_settings"]] == ["right", "right"]
+
+
+def test_a_whole_nested_column_lists_each_sub_row_as_field_value_pairs(matches):
+    message = format_message(matches, max_rows=1, display_columns=["objectId", "lspsc"])
+
+    table = message["blocks"][1]
+    (header, row) = table["rows"]
+    assert [cell["text"] for cell in header] == ["objectId", "lspsc"]
+    sub = matches.frame["lspsc"].iloc[0]
+    entries = row[1]["text"].split("; ")
+    assert len(entries) == len(sub)
+    assert entries[0].startswith(f"_id={sub['_id'].iloc[0]}, ra={sub['ra'].iloc[0]:.4f}")
+    assert [setting["align"] for setting in table["column_settings"]] == ["left", "left"]
+
+
+def test_a_row_with_no_sub_rows_gets_an_empty_cell(matches):
+    frame = matches.frame.copy()
+    # Empty the first alert's DESI matches while leaving the column nested.
+    frame = frame.query("desi_dr1.Z < 0")
+    assert len(frame) == len(matches.frame)
+    emptied = StageResult(stage=matches.stage, frame=frame, stamp=matches.stamp, summary=matches.summary)
+
+    message = format_message(emptied, max_rows=1, display_columns=["desi_dr1.Z", "desi_dr1"])
+
+    (_, row) = message["blocks"][1]["rows"]
+    assert [cell["text"] for cell in row] == ["", ""]
 
 
 def test_run_uses_the_configured_columns(slack_config, match_inputs, posted):
@@ -143,7 +186,7 @@ def test_run_uses_the_configured_columns(slack_config, match_inputs, posted):
 
     (call,) = posted
     header_row = call["blocks"][1]["rows"][0]
-    assert [cell["text"] for cell in header_row] == ["objectId", "desi_dr1"]
+    assert [cell["text"] for cell in header_row] == ["objectId"]
 
 
 def test_no_slack_section_skips(pipeline_config, match_inputs, posted, caplog):
