@@ -138,15 +138,19 @@ def test_a_configured_column_the_frame_lacks_warns_and_is_skipped(matches, caplo
 
 
 def _lines(cell):
-    """The lines of a rich_text cell, each as (text, bold)."""
+    """The lines of a rich_text cell, each as (text, bold).
+
+    Line breaks inside a table cell come from newlines in the text elements
+    of a single section -- Slack runs separate sections together -- so a
+    line's boldness is that of the element it came from.
+    """
     assert cell["type"] == "rich_text"
-    return [
-        (
-            "".join(el["text"] for el in section["elements"]),
-            any(el.get("style", {}).get("bold") for el in section["elements"]),
-        )
-        for section in cell["elements"]
-    ]
+    (section,) = cell["elements"]
+    lines = []
+    for element in section["elements"]:
+        bold = bool(element.get("style", {}).get("bold"))
+        lines += [(line, bold) for line in element["text"].split("\n") if line]
+    return lines
 
 
 def test_a_nested_field_lists_each_rows_values_one_per_line(matches):

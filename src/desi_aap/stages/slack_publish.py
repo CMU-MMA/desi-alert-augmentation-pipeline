@@ -93,25 +93,21 @@ def _raw_cell(text: str) -> dict[str, Any]:
 def _lines_cell(lines: list[str], header: str | None = None) -> dict[str, Any]:
     """A table cell showing each line on its own, under an optional bold header.
 
-    A ``rich_text`` cell renders each of its sections as a line, which is
-    the documented way to get line breaks inside a table; a ``raw_text``
-    cell's handling of newlines is not. Empty, it falls back to a blank
-    plain cell, since a rich_text cell needs at least one section.
+    A ``rich_text`` cell honors newlines inside its text elements, where a
+    ``raw_text`` cell's handling of them is undocumented; separate
+    ``rich_text_section`` elements, which stack as paragraphs elsewhere, run
+    together on one line inside a table cell. Empty, it falls back to a
+    blank plain cell, since a rich_text cell needs at least one element.
     """
-    if not lines and header is None:
-        return _raw_cell("")
-    sections = []
+    elements: list[dict[str, Any]] = []
     if header is not None:
-        sections.append(
-            {
-                "type": "rich_text_section",
-                "elements": [{"type": "text", "text": header, "style": {"bold": True}}],
-            }
-        )
-    sections += [
-        {"type": "rich_text_section", "elements": [{"type": "text", "text": line}]} for line in lines
-    ]
-    return {"type": "rich_text", "elements": sections}
+        elements.append({"type": "text", "text": header, "style": {"bold": True}})
+    if lines:
+        body = "\n".join(lines)
+        elements.append({"type": "text", "text": f"\n{body}" if header is not None else body})
+    if not elements:
+        return _raw_cell("")
+    return {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": elements}]}
 
 
 def _column_cells(shown: npd.NestedFrame, name: str) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
