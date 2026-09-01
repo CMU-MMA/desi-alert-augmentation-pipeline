@@ -102,6 +102,7 @@ credentials = "~/.config/desi_aap/slack.toml"
 channel = "#desi-alerts"
 max_rows = 20
 columns = ["objectId", "candidate.ra", "candidate.dec"]
+max_nested_rows = 3
 ```
 
 Everything else is a property of one invocation rather than of the pipeline's
@@ -195,9 +196,9 @@ The `slack_publish` stage posts each run's candidates to a channel: a header
 naming the run, how many candidates it found, the first `max_rows` of them
 as a table of the configured `columns`, and the path to the full parquet
 output. A column may be flat, nested, or a `nested.field` path; a nested
-one lists the row's sub-rows one per line in a single cell. The pipeline
-stops before this stage when an earlier one produces no rows, so a run
-with nothing to report posts nothing.
+one lists the row's first `max_nested_rows` sub-rows one per line in a
+single cell. The pipeline stops before this stage when an earlier one
+produces no rows, so a run with nothing to report posts nothing.
 
 The `[slack]` section is optional — without it the stage logs that it is
 skipping, so a fresh clone runs with no Slack setup. To turn it on:

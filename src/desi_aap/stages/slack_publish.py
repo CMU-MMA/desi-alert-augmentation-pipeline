@@ -110,7 +110,16 @@ def _lines_cell(lines: list[str], header: str | None = None) -> dict[str, Any]:
     return {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": elements}]}
 
 
-def _column_cells(shown: npd.NestedFrame, name: str) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+def _cut_off(lines: list[str], limit: int) -> list[str]:
+    """The first ``limit`` lines, plus one saying how many were left out."""
+    if len(lines) <= limit:
+        return lines
+    return [*lines[:limit], f"... +{len(lines) - limit} more"]
+
+
+def _column_cells(
+    shown: npd.NestedFrame, name: str, max_nested_rows: int
+) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
     """The cells of one configured column, one per row of ``shown``.
 
     A name resolves, in order, as a column of the frame -- flat, or nested,
@@ -119,7 +128,9 @@ def _column_cells(shown: npd.NestedFrame, name: str) -> tuple[list[dict[str, Any
     which case each cell lists that field's values for the row, one per
     line. Checking the frame's own columns first keeps BOOM's flat alert
     fields, whose names contain dots like ``candidate.ra``, working as they
-    are. A row with no sub-rows gets an empty cell.
+    are. A row with no sub-rows gets an empty cell; one with more than
+    ``max_nested_rows`` lists that many, then a line saying how many more
+    there are.
 
     Returns
     -------
@@ -139,7 +150,11 @@ def _column_cells(shown: npd.NestedFrame, name: str) -> tuple[list[dict[str, Any
                 _raw_cell("")
                 if sub is None
                 else _lines_cell(
-                    [", ".join(_format_cell(v) for v in row) for row in sub.itertuples(index=False)], header
+                    _cut_off(
+                        [", ".join(_format_cell(v) for v in row) for row in sub.itertuples(index=False)],
+                        max_nested_rows,
+                    ),
+                    header,
                 )
                 for sub in series
             ]
@@ -151,14 +166,20 @@ def _column_cells(shown: npd.NestedFrame, name: str) -> tuple[list[dict[str, Any
     if nested in shown.nested_columns and field in shown[nested].nest.columns:
         align = "right" if shown[nested].nest[field].dtype.kind == "f" else "left"
         cells = [
-            _lines_cell([] if sub is None else [_format_cell(value) for value in sub[field]])
+            _lines_cell(
+                []
+                if sub is None
+                else _cut_off([_format_cell(value) for value in sub[field]], max_nested_rows)
+            )
             for sub in shown[nested]
         ]
         return cells, {"align": align, "is_wrapped": True}
     return None
 
 
-def format_message(result: StageResult, max_rows: int, display_columns: list[str]) -> dict[str, Any]:
+def format_message(
+    result: StageResult, max_rows: int, display_columns: list[str], max_nested_rows: int = 3
+) -> dict[str, Any]:
     """Render a stage's non-empty frame as one Slack message.
 
     Parameters
@@ -174,6 +195,9 @@ def format_message(result: StageResult, max_rows: int, display_columns: list[str
         ``nested.field`` path; the last two render the row's sub-rows as
         lines of one cell, as :func:`_column_cells` describes. A name the
         frame lacks is skipped, with a warning.
+    max_nested_rows : int
+        How many sub-rows a nested cell lists before cutting off, normally
+        ``[slack].max_nested_rows`` from the config.
 
     Returns
     -------
@@ -195,7 +219,7 @@ def format_message(result: StageResult, max_rows: int, display_columns: list[str
     columns = []
     missing = []
     for name in display_columns:
-        resolved = _column_cells(shown, name)
+        resolved = _column_cells(shown, name, max_nested_rows)
         if resolved is None:
             missing.append(name)
         else:
@@ -318,7 +342,7 @@ def run_slack_publish(
         logger.info("No rows to publish; posting nothing.")
         return result
 
-    message = format_message(upstream, cfg.slack.max_rows, cfg.slack.columns)
+    message = format_message(upstream, cfg.slack.max_rows, cfg.slack.columns, cfg.slack.max_nested_rows)
     if dry_run:
         logger.info(
             "Dry run: not posting to Slack. %s Blocks payload:\n%s",

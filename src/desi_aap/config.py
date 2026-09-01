@@ -190,6 +190,8 @@ class SlackConfig(_Section):
     # frame lacks. A nested column, or a `nested.field` path into one, shows
     # the row's sub-rows one per line in a single cell.
     columns: list[str] = ["objectId", "candidate.ra", "candidate.dec"]
+    # How many of a row's sub-rows a nested cell lists before cutting off.
+    max_nested_rows: int = Field(default=3, ge=1)
 
 
 class QueryConfig(_Section):

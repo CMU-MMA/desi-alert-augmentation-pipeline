@@ -188,6 +188,33 @@ def test_a_whole_nested_column_lists_sub_rows_under_a_header_line(matches):
     assert table["column_settings"] == [{"align": "left"}, {"align": "left", "is_wrapped": True}]
 
 
+def test_a_nested_cell_cuts_off_at_max_nested_rows(matches):
+    # lspsc has three sources per alert; two fit, so the third becomes a count.
+    message = format_message(matches, max_rows=1, display_columns=["lspsc.ra", "lspsc"], max_nested_rows=2)
+
+    (_, row) = message["blocks"][1]["rows"]
+    ras = [f"{ra:.4f}" for ra in matches.frame["lspsc"].iloc[0]["ra"]]
+    assert _lines(row[0]) == [(ras[0], False), (ras[1], False), ("... +1 more", False)]
+    whole = _lines(row[1])
+    assert whole[0][1] is True  # the header line stays
+    assert len(whole) == 4
+    assert whole[-1] == ("... +1 more", False)
+    # Exactly at the limit, nothing is cut and no count is shown.
+    exact = format_message(matches, max_rows=1, display_columns=["lspsc.ra"], max_nested_rows=3)
+    assert len(_lines(exact["blocks"][1]["rows"][1][0])) == 3
+
+
+def test_run_uses_the_configured_nested_cutoff(slack_config, match_inputs, posted):
+    section = slack_config.slack.model_copy(update={"columns": ["lspsc.ra"], "max_nested_rows": 1})
+    cfg = slack_config.model_copy(update={"slack": section})
+
+    run_slack_publish(cfg, inputs=match_inputs, stamp=STAMP)
+
+    (call,) = posted
+    first_cell = call["blocks"][1]["rows"][1][0]
+    assert _lines(first_cell)[-1] == ("... +2 more", False)
+
+
 def test_a_row_with_no_sub_rows_gets_an_empty_cell(matches):
     frame = matches.frame.copy()
     # Empty every alert's DESI matches while leaving the column nested.
@@ -293,15 +320,20 @@ def test_a_slack_error_surfaces_the_schema_details(monkeypatch):
         post_message("xoxb-test-token", "#desi-alerts", "hello")
 
 
-def test_max_rows_must_be_positive(slack_credentials):
-    with pytest.raises(ValueError, match="max_rows"):
+@pytest.mark.parametrize("field", ["max_rows", "max_nested_rows"])
+def test_row_limits_must_be_positive(slack_credentials, field):
+    with pytest.raises(ValueError, match=field):
         PipelineConfig.model_validate(
             {
                 "run": {"output_dir": "out"},
                 "query": {"boom": {"survey": "LSST"}, "window": {"lookback": "1h"}},
-                "slack": {"credentials": str(slack_credentials), "channel": "#c", "max_rows": 0},
+                "slack": {"credentials": str(slack_credentials), "channel": "#c", field: 0},
             }
         )
+
+
+def test_the_nested_cutoff_defaults_to_three(slack_credentials):
+    assert SlackConfig(credentials=slack_credentials, channel="#c").max_nested_rows == 3
 
 
 # TODO(#45): localize now runs before this stage and is empty on most runs, so
