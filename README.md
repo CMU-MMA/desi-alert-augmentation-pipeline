@@ -101,6 +101,8 @@ recheck_window = "30d"
 credentials = "~/.config/desi_aap/slack.toml"
 channel = "#desi-alerts"
 max_rows = 20
+columns = ["objectId", "candidate.ra", "candidate.dec"]
+max_nested_rows = 3
 ```
 
 Everything else is a property of one invocation rather than of the pipeline's
@@ -192,10 +194,11 @@ cache_dir = "/ocean/projects/phy250012p/shared/3DTS/gracedb_cache"
 
 The `slack_publish` stage posts each run's candidates to a channel: a header
 naming the run, how many candidates it found, the first `max_rows` of them
-with their coordinates and per-catalog match counts, and the path to the
-full parquet output. The
-pipeline stops before this stage when an earlier one produces no rows, so a
-run with nothing to report posts nothing.
+as a table of the configured `columns`, and the path to the full parquet
+output. A column may be flat, nested, or a `nested.field` path; a nested
+one lists the row's first `max_nested_rows` sub-rows one per line in a
+single cell. The pipeline stops before this stage when an earlier one
+produces no rows, so a run with nothing to report posts nothing.
 
 The `[slack]` section is optional — without it the stage logs that it is
 skipping, so a fresh clone runs with no Slack setup. To turn it on:
@@ -223,18 +226,18 @@ skipping, so a fresh clone runs with no Slack setup. To turn it on:
 way to preview the formatting before pointing it at a real channel.
 
 To exercise just this stage on known input, start the pipeline at it. Any
-previous run's matches file works, or build one from the committed test data
-(`python scripts/make_test_matches.py test_matches.parquet`, with `--rows` to
-tile it bigger):
+previous run's coincidences or matches file works, or build one from the
+committed test data (`python scripts/make_test_matches.py test_matches.parquet`,
+with `--rows` to tile it bigger):
 
 ```bash
 # Preview the message this file would produce, without posting:
 desi-aap run -c config.toml --from-stage slack_publish \
-             --input output/crossmatch/matches_<stamp>.parquet --dry-run
+             --input output/localize/coincidences_<stamp>.parquet --dry-run
 
 # Post it for real, once [slack] is configured:
 desi-aap run -c config.toml --from-stage slack_publish \
-             --input output/crossmatch/matches_<stamp>.parquet
+             --input output/localize/coincidences_<stamp>.parquet
 ```
 
 ## The localize stage

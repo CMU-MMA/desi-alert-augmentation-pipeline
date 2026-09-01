@@ -100,6 +100,12 @@ min_redshift = 0.0002
 # channel = "#desi-alerts"
 # # Candidates listed in the message before it cuts off.
 # max_rows = 20
+# # Columns the message's table shows, in this order; one the results lack is
+# # skipped. A nested column, or a `nested.field` path into one, lists the
+# # row's sub-rows one per line in a single cell.
+# columns = ["objectId", "candidate.ra", "candidate.dec"]
+# # Sub-rows a nested cell lists before it cuts off.
+# max_nested_rows = 3
 
 # ===========================================================================
 # GraceDB -- superevent metadata and skymap cache.
