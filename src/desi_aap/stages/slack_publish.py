@@ -29,7 +29,7 @@ from slack_sdk.errors import SlackApiError
 
 from desi_aap.config import PipelineConfig
 from desi_aap.stages.base import StageInputs, StageResult, input_result
-from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
+from desi_aap.stages.localize import STAGE as LOCALIZE_STAGE
 from desi_aap.utils import run_stamp
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ STAGE = "slack_publish"
 
 # The stage whose frame gets published. As stages are added between crossmatch
 # and this one, point this at the new last data stage.
-INPUT_STAGE = CROSSMATCH_STAGE
+INPUT_STAGE = LOCALIZE_STAGE
 
 
 def load_bot_token(path: Path) -> str:
