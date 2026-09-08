@@ -29,19 +29,17 @@ from slack_sdk.errors import SlackApiError
 
 from desi_aap.config import PipelineConfig
 from desi_aap.stages.base import StageInputs, StageResult, input_result
-from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
+from desi_aap.stages.localize import STAGE as LOCALIZE_STAGE
 from desi_aap.utils import run_stamp
 
 logger = logging.getLogger(__name__)
 
 STAGE = "slack_publish"
 
-# The stage whose frame gets published. As stages are added between crossmatch
-# and this one, point this at the new last data stage.
-INPUT_STAGE = CROSSMATCH_STAGE
-
-# Flat columns the table shows, in order, skipping any the frame lacks.
-DISPLAY_COLUMNS = ["objectId", "candidate.ra", "candidate.dec"]
+# The stage whose frame gets published: the last data stage in
+# desi_aap.pipeline.STAGE_ORDER. As stages are added before this one, point
+# this at the new last data stage.
+INPUT_STAGE = LOCALIZE_STAGE
 
 
 def load_bot_token(path: Path) -> str:
@@ -88,20 +86,101 @@ def _format_cell(value: object) -> str:
     return str(value)
 
 
-def _match_columns(frame: npd.NestedFrame) -> list[str]:
-    """The nested columns a crossmatch left, one per catalog.
+def _raw_cell(text: str) -> dict[str, Any]:
+    """A plain table cell."""
+    return {"type": "raw_text", "text": text}
 
-    Recognized by the ``_dist_arcsec`` field ``crossmatch_nested`` adds, which
-    keeps the alerts' own nested columns (BOOM's ``lspsc``) out of the table.
+
+def _lines_cell(lines: list[str], header: str | None = None) -> dict[str, Any]:
+    """A table cell showing each line on its own, under an optional bold header.
+
+    A ``rich_text`` cell honors newlines inside its text elements, where a
+    ``raw_text`` cell's handling of them is undocumented; separate
+    ``rich_text_section`` elements, which stack as paragraphs elsewhere, run
+    together on one line inside a table cell. Empty, it falls back to a
+    blank plain cell, since a rich_text cell needs at least one element.
     """
-    return [
-        column
-        for column, dtype in frame.dtypes.items()
-        if isinstance(dtype, npd.NestedDtype) and "_dist_arcsec" in frame[column].nest.columns
-    ]
+    elements: list[dict[str, Any]] = []
+    if header is not None:
+        elements.append({"type": "text", "text": header, "style": {"bold": True}})
+    if lines:
+        body = "\n".join(lines)
+        elements.append({"type": "text", "text": f"\n{body}" if header is not None else body})
+    if not elements:
+        return _raw_cell("")
+    return {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": elements}]}
 
 
-def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
+def _cut_off(lines: list[str], limit: int) -> list[str]:
+    """The first ``limit`` lines, plus one saying how many were left out."""
+    if len(lines) <= limit:
+        return lines
+    return [*lines[:limit], f"... +{len(lines) - limit} more"]
+
+
+def _column_cells(
+    shown: npd.NestedFrame, name: str, max_nested_rows: int
+) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    """The cells of one configured column, one per row of ``shown``.
+
+    A name resolves, in order, as a column of the frame -- flat, or nested,
+    in which case each cell lists the row's sub-rows one per line under a
+    bold header line naming the fields -- or as a ``nested.field`` path, in
+    which case each cell lists that field's values for the row, one per
+    line. Checking the frame's own columns first keeps BOOM's flat alert
+    fields, whose names contain dots like ``candidate.ra``, working as they
+    are. A row with no sub-rows gets an empty cell; one with more than
+    ``max_nested_rows`` lists that many, then a line saying how many more
+    there are.
+
+    Returns
+    -------
+    tuple of (list of dict, dict) or None
+        The Block Kit cells and the column's ``column_settings`` entry --
+        measures right-align like numbers, the integer identifiers stay
+        left like labels, and nested cells wrap so their lines show -- or
+        None when the frame has no such column or field.
+    """
+    if name in shown.columns:
+        series = shown[name]
+        if isinstance(series.dtype, npd.NestedDtype):
+            header = ", ".join(series.nest.columns)
+            # Iterating a nested column yields each row's sub-rows as a
+            # DataFrame, or None when it has none.
+            cells = [
+                _raw_cell("")
+                if sub is None
+                else _lines_cell(
+                    _cut_off(
+                        [", ".join(_format_cell(v) for v in row) for row in sub.itertuples(index=False)],
+                        max_nested_rows,
+                    ),
+                    header,
+                )
+                for sub in series
+            ]
+            return cells, {"align": "left", "is_wrapped": True}
+        align = "right" if series.dtype.kind == "f" else "left"
+        return [_raw_cell(_format_cell(value)) for value in series], {"align": align}
+
+    nested, _, field = name.partition(".")
+    if nested in shown.nested_columns and field in shown[nested].nest.columns:
+        align = "right" if shown[nested].nest[field].dtype.kind == "f" else "left"
+        cells = [
+            _lines_cell(
+                []
+                if sub is None
+                else _cut_off([_format_cell(value) for value in sub[field]], max_nested_rows)
+            )
+            for sub in shown[nested]
+        ]
+        return cells, {"align": align, "is_wrapped": True}
+    return None
+
+
+def format_message(
+    result: StageResult, max_rows: int, display_columns: list[str], max_nested_rows: int = 3
+) -> dict[str, Any]:
     """Render a stage's non-empty frame as one Slack message.
 
     Parameters
@@ -111,6 +190,15 @@ def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
         message also names its ``stamp`` and, when set, its ``output_path``.
     max_rows : int
         How many rows the table lists before cutting off.
+    display_columns : list of str
+        Columns the table shows, in this order, normally ``[slack].columns``
+        from the config. Each may be a flat column, a nested column, or a
+        ``nested.field`` path; the last two render the row's sub-rows as
+        lines of one cell, as :func:`_column_cells` describes. A name the
+        frame lacks is skipped, with a warning.
+    max_nested_rows : int
+        How many sub-rows a nested cell lists before cutting off, normally
+        ``[slack].max_nested_rows`` from the config.
 
     Returns
     -------
@@ -127,33 +215,30 @@ def format_message(result: StageResult, max_rows: int) -> dict[str, Any]:
     found = f"{n_rows} candidate{'' if n_rows == 1 else 's'} found"
     cutoff = f". Showing the first {max_rows}:" if n_rows > max_rows else ":"
 
-    # Each column is (name, its cells as strings, whether it right-aligns).
-    # Measures right-align like numbers; the integer identifiers stay left,
-    # like labels.
+    # Each column is (name, its Block Kit cells, its column_settings entry).
     shown = frame.head(max_rows)
-    columns = [
-        (name, [_format_cell(value) for value in shown[name]], shown[name].dtype.kind == "f")
-        for name in DISPLAY_COLUMNS
-        if name in frame.columns
-    ]
-    # Each catalog's column shows how many of its sources matched the alert.
-    columns += [
-        (name, [str(count) for count in shown[name].array.list_lengths], True)
-        for name in _match_columns(frame)
-    ]
+    columns = []
+    missing = []
+    for name in display_columns:
+        resolved = _column_cells(shown, name, max_nested_rows)
+        if resolved is None:
+            missing.append(name)
+        else:
+            columns.append((name, *resolved))
+    if missing:
+        logger.warning("Configured [slack] column(s) not in the frame, skipping: %s", ", ".join(missing))
 
-    # Every cell is raw_text, holding our own formatting: as of 2026-08 Slack's
-    # validator rejects the raw_number cells its docs describe (it wants an
-    # undocumented `value` field), and a preformatted string renders the same.
-    header_row = [{"type": "raw_text", "text": name} for name, _, _ in columns]
-    value_rows = [
-        [{"type": "raw_text", "text": cells[i]} for _, cells, _ in columns] for i in range(len(shown))
-    ]
+    # Flat cells are raw_text holding our own formatting: as of 2026-08
+    # Slack's validator rejects the raw_number cells its docs describe (it
+    # wants an undocumented `value` field), and a preformatted string renders
+    # the same. Nested cells are rich_text, for their line breaks.
+    header_row = [_raw_cell(name) for name, _, _ in columns]
+    value_rows = [[cells[i] for _, cells, _ in columns] for i in range(len(shown))]
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*\n{found}{cutoff}"}},
         {
             "type": "table",
-            "column_settings": [{"align": "right" if numeric else "left"} for _, _, numeric in columns],
+            "column_settings": [settings for _, _, settings in columns],
             "rows": [header_row, *value_rows],
         },
     ]
@@ -258,7 +343,7 @@ def run_slack_publish(
         logger.info("No rows to publish; posting nothing.")
         return result
 
-    message = format_message(upstream, cfg.slack.max_rows)
+    message = format_message(upstream, cfg.slack.max_rows, cfg.slack.columns, cfg.slack.max_nested_rows)
     if dry_run:
         logger.info(
             "Dry run: not posting to Slack. %s Blocks payload:\n%s",
