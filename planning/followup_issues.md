@@ -3,8 +3,10 @@
 Deferred from the GCN/GraceDB read-time union (see `desi-aap-gcn-integration-plan.md`).
 Each section below is one issue, body included. Revise before posting.
 
-Issues 1 and 2 add **new rows**; issue 3 adds **context to rows that already exist**; issue 4
-is a question to settle about a cut, not a feature.
+Issues 1 and 2 add **new rows**; issue 3 adds **context to rows that already exist**; issues 4
+and 5 are questions to settle about filters, not features. Both 4 and 5 are answerable from a few
+weeks of captured notices rather than from the spec, so they get cheaper after this PR ships and
+the archive fills.
 
 ---
 
@@ -101,6 +103,40 @@ step with the config the pipeline actually runs from.
 
 **Not the same as the MDC exclusion.** MDC is hardcoded with no knob, because it is not a
 science cut but a "this is not real data" fact. Only `significant` is in question here.
+
+---
+
+## 5. Confirm which signal authoritatively identifies an MDC alert
+
+**Problem.** The GCN read path excludes MDC alerts, to match the `category: Production` filter the
+GraceDB listing query already applies (`gracedb_tools.py:478`). It currently excludes on **two**
+signals, either sufficient: `event.search == "MDC"`, or a superevent id beginning with `M`.
+
+That is a deliberate best guess, not a confirmed rule. The only payload we have carries both
+signals at once (`gcn_examples.py:39,118` — `MS181101ab` with `"search": "MDC"`), so neither has
+been shown sufficient on its own, and neither has been shown necessary. The belt-and-braces
+version was chosen for its failure mode: over-excluding a real event shows up in the logged count
+and is recoverable, while under-excluding puts mock data silently into science results.
+
+**What to check.**
+
+- Whether the `S` / `MS` / `TS` superevent-id prefix convention is documented anywhere
+  authoritative, and whether it is guaranteed rather than customary. If it is, an allowlist
+  (`id.startswith("S")`) is stronger than the current blocklist and is the likely end state —
+  consistent with the allowlist reasoning used for the `gw`/`lvk` scope filter.
+- Whether `search` takes values other than `MDC` that also indicate non-astrophysical data.
+- Whether the two signals ever disagree in the captured archive. The sweep logs which rule fired
+  for each exclusion precisely so this can be answered from our own data.
+
+**Also worth settling here.** A store captured from `--domain test.gcn.nasa.gov` is
+indistinguishable from a production one once written — `store_notice` records the topic but not
+the domain (`gcn_listener.py:198`). The mitigation today is documentation: use a separate
+`--store-root` when rehearsing. If the id-prefix rule turns out to be reliable it may cover this
+too; if not, recording the domain on the history entry is the alternative, at the cost of every
+already-captured entry reading `None`.
+
+**Not the same as issue 4.** That one asks whether a *science* cut (`significant`) is redundant.
+This one asks how to recognise data that is not science at all.
 
 ---
 
