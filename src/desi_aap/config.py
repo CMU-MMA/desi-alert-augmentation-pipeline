@@ -9,7 +9,14 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
-from desi_aap.boom import parse_timedelta
+from desi_aap.boom import (
+    ALERT_BAND_COLUMN,
+    ALERT_DEC_COLUMN,
+    ALERT_ID_COLUMN,
+    ALERT_MAG_COLUMN,
+    ALERT_RA_COLUMN,
+    parse_timedelta,
+)
 from desi_aap.gracedb_cache import GraceDbCache
 
 
@@ -209,6 +216,21 @@ class SlackConfig(_Section):
     # How many candidates the message lists before cutting off. At most 99:
     # Slack's table block holds 100 rows, and the header takes one.
     max_rows: int = Field(default=20, ge=1, le=99)
+    # Columns every filter's table shows first, in this order, skipping any the
+    # frame lacks; a filter's own columns follow. A nested column, or a
+    # `nested.field` path into one, shows the row's sub-rows one per line in a
+    # single cell. The default is what identifies an alert, where to point a
+    # telescope, and how bright it was in which band -- the last two together,
+    # since a magnitude without its band is not a brightness anyone can act on.
+    columns: list[str] = [
+        ALERT_ID_COLUMN,
+        ALERT_RA_COLUMN,
+        ALERT_DEC_COLUMN,
+        ALERT_MAG_COLUMN,
+        ALERT_BAND_COLUMN,
+    ]
+    # How many of a row's sub-rows a nested cell lists before cutting off.
+    max_nested_rows: int = Field(default=3, ge=1)
 
 
 class FiltersConfig(_Section):

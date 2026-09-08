@@ -33,10 +33,11 @@ class SlackDisplay:
         candidates". A noun phrase, lowercase except for proper nouns, and
         written so it reads with a count in front of it.
     columns : tuple of str
-        Flat columns to show after the ones every filter shows
-        (:data:`desi_aap.stages.slack_publish.DISPLAY_COLUMNS`), in order. A
-        column the frame lacks is skipped rather than raising, so a filter may
-        name one that only some runs produce.
+        Columns to show after the ones every filter shows (``[slack].columns``
+        in the config), in order. Each may be a flat column, a nested column,
+        or a ``nested.field`` path, as :func:`desi_aap.stages.slack_publish.format_message`
+        describes. A column the frame lacks is skipped rather than raising, so
+        a filter may name one that only some runs produce.
     """
 
     title: str

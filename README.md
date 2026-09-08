@@ -188,6 +188,8 @@ recheck_window = "30d"
 credentials = "~/.config/desi_aap/slack.toml"
 channel = "#desi-alerts"
 max_rows = 20
+columns = ["objectId", "candidate.ra", "candidate.dec", "candidate.magpsf", "candidate.band"]
+max_nested_rows = 3
 ```
 
 Everything else is a property of one invocation rather than of the pipeline's
@@ -335,14 +337,16 @@ cache_dir = "/ocean/projects/phy250012p/shared/3DTS/gracedb_cache"
 
 The `slack_publish` stage posts **one message per filter** that found
 something: a header naming the run and what that filter found, the first
-`max_rows` candidates, and the path to the full parquet output.
+`max_rows` candidates as a table, and the path to the full parquet output.
 
-Every message shows what identifies an alert and where to point a telescope —
-`objectId`, its coordinates, and `candidate.magpsf` with the `candidate.band`
-it was measured in, since a magnitude without its band is not a brightness
-anyone can act on. After those come whichever columns the filter itself
-considers worth reading — a code filter's `SLACK_DISPLAY`, a JSON filter's
-`"columns"` key.
+Every message's table starts with the configured `columns`. The default is what
+identifies an alert and where to point a telescope — `objectId`, its
+coordinates, and `candidate.magpsf` with the `candidate.band` it was measured
+in, since a magnitude without its band is not a brightness anyone can act on.
+After those come whichever columns the filter itself considers worth reading —
+a code filter's `SLACK_DISPLAY`, a JSON filter's `"columns"` key. Either kind
+of column may be flat, nested, or a `nested.field` path; a nested one lists
+the row's first `max_nested_rows` sub-rows one per line in a single cell.
 
 One message per filter rather than one per run because the filters answer
 different questions and are read by different people — a GW coincidence wants
@@ -374,16 +378,17 @@ skipping, so a fresh clone runs with no Slack setup. To turn it on:
 
 4. Invite the bot to the target channel (`/invite @<bot name>` in the
    channel) and fill in the `[slack]` section: `credentials` is the path from
-   step 3, `channel` is where it posts, and `max_rows` is how many candidates
-   the message lists before cutting off.
+   step 3, `channel` is where it posts, `max_rows` is how many candidates
+   the message lists before cutting off, and `columns` and `max_nested_rows`
+   are what each row shows, as described above.
 
 `--dry-run` builds the message and logs it instead of posting, which is the
 way to preview the formatting before pointing it at a real channel.
 
 To exercise just this stage on known input, start the pipeline at it. Any
-previous run's matches file works, or build one from the committed test data
-(`python scripts/make_test_matches.py test_matches.parquet`, with `--rows` to
-tile it bigger):
+previous run's coincidences or matches file works, or build one from the
+committed test data (`python scripts/make_test_matches.py test_matches.parquet`,
+with `--rows` to tile it bigger):
 
 ```bash
 # Preview the message this file would produce, without posting:
