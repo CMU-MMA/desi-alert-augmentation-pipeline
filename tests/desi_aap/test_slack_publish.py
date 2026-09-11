@@ -5,12 +5,14 @@ import logging
 import pytest
 from slack_sdk.errors import SlackApiError
 
+from desi_aap import pipeline
 from desi_aap.config import PipelineConfig, SlackConfig
 from desi_aap.stages import slack_publish
-from desi_aap.stages.base import StageResult
+from desi_aap.stages.base import SlackDisplay, StageResult
 from desi_aap.stages.crossmatch import run_crossmatch
+from desi_aap.stages.localize import SLACK_DISPLAY as LOCALIZE_DISPLAY
+from desi_aap.stages.localize import STAGE as LOCALIZE_STAGE
 from desi_aap.stages.slack_publish import (
-    INPUT_STAGE,
     STAGE,
     format_message,
     load_bot_token,
@@ -19,61 +21,35 @@ from desi_aap.stages.slack_publish import (
 )
 
 STAMP = "20260807T120000Z"
-DEFAULT_COLUMNS = ["objectId", "candidate.ra", "candidate.dec"]
-
-
-@pytest.fixture
-def slack_credentials(tmp_path):
-    """A credentials file holding a fake bot token."""
-    path = tmp_path / "slack.toml"
-    path.write_text('bot_token = "xoxb-test-token"\n')
-    return path
-
-
-@pytest.fixture
-def slack_config(pipeline_config, slack_credentials):
-    """The shared config, with a [slack] section pointing at the fake credentials."""
-    section = SlackConfig(credentials=slack_credentials, channel="#desi-alerts", max_rows=5)
-    return pipeline_config.model_copy(update={"slack": section})
+# What every filter's table starts with when [slack] columns is left alone.
+DEFAULT_COLUMNS = ["objectId", "candidate.ra", "candidate.dec", "candidate.magpsf", "candidate.band"]
 
 
 @pytest.fixture
 def matches(pipeline_config, gold_standard_alerts):
-    """A real crossmatch result to publish, nested match column and all.
+    """A real frame to publish, nested match column and all.
 
-    The stage reads whatever :data:`INPUT_STAGE` produced; a crossmatch
-    frame has the same shape and is cheap to build from the test data.
+    A crossmatch result rather than a filter's own output: what this stage does
+    with a frame does not depend on which filter produced it, and building one
+    without reaching GraceDB keeps the formatting tests independent of the GW
+    machinery. It is labelled as the filter's below, which is all this stage
+    reads.
     """
     inputs = {"query": StageResult(stage="query", frame=gold_standard_alerts)}
-    return run_crossmatch(pipeline_config, dry_run=True, inputs=inputs, stamp=STAMP)
+    result = run_crossmatch(pipeline_config, dry_run=True, inputs=inputs, stamp=STAMP)
+    return StageResult(stage=LOCALIZE_STAGE, frame=result.frame, stamp=result.stamp)
 
 
 @pytest.fixture
 def match_inputs(matches):
-    """What the input stage would have handed this one."""
-    return {INPUT_STAGE: matches}
-
-
-@pytest.fixture
-def posted(monkeypatch):
-    """Capture what would have gone to Slack instead of calling the Web API."""
-    calls = []
-
-    class FakeWebClient:
-        def __init__(self, token):
-            self.token = token
-
-        def chat_postMessage(self, **kwargs):  # noqa: N802 -- the slack_sdk method name
-            calls.append({"token": self.token, **kwargs})
-
-    monkeypatch.setattr(slack_publish, "WebClient", FakeWebClient)
-    return calls
+    """What the localize filter would have handed this one."""
+    return {LOCALIZE_STAGE: matches}
 
 
 def test_run_posts_the_matches(slack_config, match_inputs, posted):
     result = run_slack_publish(slack_config, inputs=match_inputs, stamp=STAMP)
 
-    assert result.summary["posted"] is True
+    assert result.summary["n_posted"] == 1
     (call,) = posted
     assert call["token"] == "xoxb-test-token"
     assert call["channel"] == "#desi-alerts"
@@ -82,25 +58,34 @@ def test_run_posts_the_matches(slack_config, match_inputs, posted):
 
 
 def test_the_message_lists_rows_and_cuts_off(matches):
-    message = format_message(matches, max_rows=5, display_columns=DEFAULT_COLUMNS)
+    message = format_message(matches, LOCALIZE_DISPLAY, max_rows=5, display_columns=DEFAULT_COLUMNS)
 
     section, table = message["blocks"][:2]
-    assert "8 candidates found. Showing the first 5:" in section["text"]["text"]
+    assert "8 GW coincidence candidates found. Showing the first 5:" in section["text"]["text"]
     # One row per shown alert, plus the header row.
     rows = table["rows"]
     assert len(rows) == 6
-    assert [cell["text"] for cell in rows[0]] == ["objectId", "candidate.ra", "candidate.dec"]
+    # The configured columns; the filter's own (superevent, host redshift,
+    # distance) are not on a crossmatch frame, so they are skipped.
+    assert [cell["text"] for cell in rows[0]] == DEFAULT_COLUMNS
     # Every cell is raw_text -- Slack rejects its documented raw_number shape --
-    # with measures right-aligned per column instead.
+    # with measures right-aligned per column instead. The band is a letter, so
+    # it stays left like the identifier rather than right like the magnitude.
     assert all(cell["type"] == "raw_text" for row in rows for cell in row)
-    assert [setting["align"] for setting in table["column_settings"]] == ["left", "right", "right"]
+    assert [setting["align"] for setting in table["column_settings"]] == [
+        "left",
+        "right",
+        "right",
+        "right",
+        "left",
+    ]
 
 
 def test_a_short_message_has_no_cutoff_line(matches):
-    message = format_message(matches, max_rows=20, display_columns=DEFAULT_COLUMNS)
+    message = format_message(matches, LOCALIZE_DISPLAY, max_rows=20, display_columns=DEFAULT_COLUMNS)
 
     section, table = message["blocks"][:2]
-    assert "8 candidates found:" in section["text"]["text"]
+    assert "8 GW coincidence candidates found:" in section["text"]["text"]
     assert "Showing the first" not in section["text"]["text"]
     assert len(table["rows"]) == 9
 
@@ -115,25 +100,46 @@ def test_the_message_names_the_output_file(matches, tmp_path):
         summary=matches.summary,
     )
 
-    context = format_message(with_path, max_rows=5, display_columns=DEFAULT_COLUMNS)["blocks"][-1]
+    context = format_message(with_path, LOCALIZE_DISPLAY, max_rows=5, display_columns=DEFAULT_COLUMNS)[
+        "blocks"
+    ][-1]
     assert context["type"] == "context"
     assert f"Full results: `{written}`" in context["elements"][0]["text"]
     # The dry-run result wrote nothing, so there is no path to point at.
-    blocks = format_message(matches, max_rows=5, display_columns=DEFAULT_COLUMNS)["blocks"]
+    blocks = format_message(matches, LOCALIZE_DISPLAY, max_rows=5, display_columns=DEFAULT_COLUMNS)["blocks"]
     assert all(block["type"] != "context" for block in blocks)
 
 
 def test_configured_columns_choose_and_order_the_table(matches):
-    message = format_message(matches, max_rows=5, display_columns=["candidate.dec", "objectId"])
+    message = format_message(
+        matches, LOCALIZE_DISPLAY, max_rows=5, display_columns=["candidate.dec", "objectId"]
+    )
 
     rows = message["blocks"][1]["rows"]
     assert [cell["text"] for cell in rows[0]] == ["candidate.dec", "objectId"]
 
 
+def test_the_filters_own_columns_follow_the_configured_ones(matches, caplog):
+    display = SlackDisplay(title="candidate", columns=("candidate.band", "only_some_runs_have_this"))
+
+    with caplog.at_level(logging.INFO):
+        message = format_message(matches, display, max_rows=5, display_columns=["objectId", "candidate.ra"])
+
+    rows = message["blocks"][1]["rows"]
+    assert [cell["text"] for cell in rows[0]] == ["objectId", "candidate.ra", "candidate.band"]
+    # A filter may name a column only some runs produce, so that is a note, not
+    # the warning a mis-configured [slack] column gets.
+    assert "only_some_runs_have_this" in caplog.text
+    assert "Configured [slack] column(s)" not in caplog.text
+
+
 def test_a_configured_column_the_frame_lacks_warns_and_is_skipped(matches, caplog):
     with caplog.at_level(logging.WARNING):
         message = format_message(
-            matches, max_rows=5, display_columns=["objectId", "no_such_column", "desi_dr1.NO_SUCH_FIELD"]
+            matches,
+            LOCALIZE_DISPLAY,
+            max_rows=5,
+            display_columns=["objectId", "no_such_column", "desi_dr1.NO_SUCH_FIELD"],
         )
 
     assert "no_such_column, desi_dr1.NO_SUCH_FIELD" in caplog.text
@@ -159,7 +165,9 @@ def _lines(cell):
 
 def test_a_nested_field_lists_each_rows_values_one_per_line(matches):
     # lspsc has three sources per alert; desi_dr1 one match per alert.
-    message = format_message(matches, max_rows=2, display_columns=["lspsc.ra", "desi_dr1.Z"])
+    message = format_message(
+        matches, LOCALIZE_DISPLAY, max_rows=2, display_columns=["lspsc.ra", "desi_dr1.Z"]
+    )
 
     table = message["blocks"][1]
     (header, first, second) = table["rows"]
@@ -173,7 +181,7 @@ def test_a_nested_field_lists_each_rows_values_one_per_line(matches):
 
 
 def test_a_whole_nested_column_lists_sub_rows_under_a_header_line(matches):
-    message = format_message(matches, max_rows=1, display_columns=["objectId", "lspsc"])
+    message = format_message(matches, LOCALIZE_DISPLAY, max_rows=1, display_columns=["objectId", "lspsc"])
 
     table = message["blocks"][1]
     (header, row) = table["rows"]
@@ -194,7 +202,9 @@ def test_a_whole_nested_column_lists_sub_rows_under_a_header_line(matches):
 
 def test_a_nested_cell_cuts_off_at_max_nested_rows(matches):
     # lspsc has three sources per alert; two fit, so the third becomes a count.
-    message = format_message(matches, max_rows=1, display_columns=["lspsc.ra", "lspsc"], max_nested_rows=2)
+    message = format_message(
+        matches, LOCALIZE_DISPLAY, max_rows=1, display_columns=["lspsc.ra", "lspsc"], max_nested_rows=2
+    )
 
     (_, row) = message["blocks"][1]["rows"]
     ras = [f"{ra:.4f}" for ra in matches.frame["lspsc"].iloc[0]["ra"]]
@@ -204,7 +214,9 @@ def test_a_nested_cell_cuts_off_at_max_nested_rows(matches):
     assert len(whole) == 4
     assert whole[-1] == ("... +1 more", False)
     # Exactly at the limit, nothing is cut and no count is shown.
-    exact = format_message(matches, max_rows=1, display_columns=["lspsc.ra"], max_nested_rows=3)
+    exact = format_message(
+        matches, LOCALIZE_DISPLAY, max_rows=1, display_columns=["lspsc.ra"], max_nested_rows=3
+    )
     assert len(_lines(exact["blocks"][1]["rows"][1][0])) == 3
 
 
@@ -226,7 +238,9 @@ def test_a_row_with_no_sub_rows_gets_an_empty_cell(matches):
     assert len(frame) == len(matches.frame)
     emptied = StageResult(stage=matches.stage, frame=frame, stamp=matches.stamp, summary=matches.summary)
 
-    message = format_message(emptied, max_rows=1, display_columns=["desi_dr1.Z", "desi_dr1"])
+    message = format_message(
+        emptied, LOCALIZE_DISPLAY, max_rows=1, display_columns=["desi_dr1.Z", "desi_dr1"]
+    )
 
     (_, row) = message["blocks"][1]["rows"]
     assert row == [{"type": "raw_text", "text": ""}] * 2
@@ -248,10 +262,10 @@ def test_no_slack_section_skips(pipeline_config, match_inputs, posted, caplog):
         result = run_slack_publish(pipeline_config, inputs=match_inputs, stamp=STAMP)
 
     assert posted == []
-    assert result.summary["posted"] is False
+    assert result.summary["n_posted"] == 0
     assert "skipping" in caplog.text
-    # The frame passes through, so this stage never reads as the one that ended the run.
-    assert not result.is_empty
+    # It still reports what each filter would have contributed.
+    assert result.summary["rows_by_filter"] == {LOCALIZE_STAGE: 8}
 
 
 def test_dry_run_logs_the_message_without_posting(slack_config, match_inputs, posted, caplog):
@@ -259,21 +273,87 @@ def test_dry_run_logs_the_message_without_posting(slack_config, match_inputs, po
         result = run_slack_publish(slack_config, dry_run=True, inputs=match_inputs, stamp=STAMP)
 
     assert posted == []
-    assert result.summary["posted"] is False
-    assert "8 candidates found" in caplog.text
+    assert result.summary["n_posted"] == 0
+    assert "8 GW coincidence candidates found" in caplog.text
 
 
-def test_an_empty_upstream_posts_nothing(slack_config, posted):
-    empty = {INPUT_STAGE: StageResult(stage=INPUT_STAGE, frame=None)}
+def test_an_empty_filter_posts_nothing(slack_config, posted):
+    empty = {LOCALIZE_STAGE: StageResult(stage=LOCALIZE_STAGE, frame=None)}
     result = run_slack_publish(slack_config, inputs=empty, stamp=STAMP)
 
     assert posted == []
-    assert result.summary == {"posted": False, "n_rows": 0}
+    # The filter ran and found nothing, which is not the same as not running:
+    # it is present with a count of zero.
+    assert result.summary["n_posted"] == 0
+    assert result.summary["rows_by_filter"] == {LOCALIZE_STAGE: 0}
 
 
-def test_a_missing_upstream_names_the_stage_that_must_run_first(slack_config):
-    with pytest.raises(KeyError, match=INPUT_STAGE):
-        run_slack_publish(slack_config, inputs=None, stamp=STAMP)
+def test_a_skipped_filter_is_passed_over_but_not_counted_as_quiet(slack_config, posted):
+    """Verify a switched-off filter reads as "did not run", never as "found nothing".
+
+    The pipeline records a result for a skipped filter, marked as such; this
+    stage must keep it out of the per-filter counts, because "the GW search was
+    off" and "the GW search found nothing" must not read the same.
+    """
+    skipped = StageResult(stage=LOCALIZE_STAGE, stamp=STAMP, summary={"skipped": "disabled"})
+
+    result = run_slack_publish(slack_config, inputs={LOCALIZE_STAGE: skipped}, stamp=STAMP)
+
+    assert posted == []
+    # Absent entirely, rather than present with a zero: it never ran.
+    assert result.summary["rows_by_filter"] == {}
+
+
+def test_a_filter_missing_from_the_inputs_entirely_fails_loudly(slack_config, posted):
+    """Verify mis-keyed inputs cannot silently drop real candidates.
+
+    Every run records a result for every filter, so an absent entry is a typo
+    in a programmatic call, and "exit 0, post nothing" would be the worst
+    possible reading of it.
+    """
+    with pytest.raises(KeyError, match=LOCALIZE_STAGE):
+        run_slack_publish(slack_config, inputs={}, stamp=STAMP)
+
+    assert posted == []
+
+
+def test_a_transport_error_is_isolated_like_a_rejection(slack_config, match_inputs, monkeypatch):
+    """Verify a network-level failure, not just a Slack rejection, spares the siblings.
+
+    post_message wraps Slack's own rejections in RuntimeError, but an SSL or
+    connection error raises something else entirely, and one filter's network
+    mishap is no more a reason to withhold the others than a rejection is.
+    """
+
+    def unplugged(token, channel, text, blocks=None):
+        raise ConnectionResetError("wire fell out")
+
+    monkeypatch.setattr(slack_publish, "post_message", unplugged)
+
+    with pytest.raises(RuntimeError, match=r"Posted 0 of 1.*wire fell out"):
+        run_slack_publish(slack_config, inputs=match_inputs, stamp=STAMP)
+
+
+def test_one_rejected_message_does_not_withhold_the_others(slack_config, match_inputs, monkeypatch):
+    """Verify a Slack rejection is loud but does not silence the filters that could post.
+
+    The filters are independent, so a rate limit hit while announcing one is no
+    reason to withhold another -- but a partial post must not report as success
+    either, so the failures are raised together once the postable ones are out.
+    """
+    attempted = []
+
+    def flaky(token, channel, text, blocks=None):
+        attempted.append(text)
+        raise RuntimeError("Slack rejected the message: ratelimited.")
+
+    monkeypatch.setattr(slack_publish, "post_message", flaky)
+
+    with pytest.raises(RuntimeError, match=r"Posted 0 of 1 filter message\(s\).*ratelimited"):
+        run_slack_publish(slack_config, inputs=match_inputs, stamp=STAMP)
+
+    # It got as far as trying, rather than bailing out before the attempt.
+    assert len(attempted) == 1
 
 
 def test_a_missing_credentials_file_says_how_to_make_one(tmp_path):
@@ -336,23 +416,31 @@ def test_row_limits_must_be_positive(slack_credentials, field):
         )
 
 
-def test_the_nested_cutoff_defaults_to_three(slack_credentials):
-    assert SlackConfig(credentials=slack_credentials, channel="#c").max_nested_rows == 3
+def test_the_default_columns_are_the_identifying_ones(slack_credentials):
+    section = SlackConfig(credentials=slack_credentials, channel="#c")
+    assert section.columns == DEFAULT_COLUMNS
+    assert section.max_nested_rows == 3
 
 
-# TODO(#45): localize now runs before this stage and is empty on most runs, so
-# run_pipeline's stop-on-empty ends the run before slack_publish is reached. The
-# assertion below is left as written -- it is the invariant we still want -- so
-# strict xfail reports XPASS the moment the stage order is settled.
-@pytest.mark.xfail(
-    reason="#45: localize precedes slack_publish and stops the run when it finds no coincidence",
-    strict=True,
-)
-def test_the_stage_runs_last(slack_config, stub_boom, posted):
-    from desi_aap import pipeline
+def test_the_stage_runs_last_and_a_quiet_run_reaches_it(slack_config, stub_boom, stub_gracedb, posted):
+    """Verify the run gets all the way here rather than ending at an empty filter.
+
+    This is what the fan-out bought. Under the old stop-on-empty pipeline,
+    localize ran before this stage and was empty on most runs, so the run ended
+    early and never reached slack_publish at all. Now every stage is accounted
+    for, and this one is still last.
+
+    With one filter configured, every filter being empty does leave nothing to
+    announce, so the stage is skipped rather than run -- but it is *reached*,
+    which is the part that used to be untrue, and the skip is recorded rather
+    than being the silent end of the run.
+    """
+    stub_gracedb.searched_prob_vol = 0.99  # nothing lands inside the credible volume
 
     results = pipeline.run_pipeline(slack_config, stamp=STAMP)
 
     assert list(results)[-1] == STAGE
-    (call,) = posted
-    assert "8 candidates found" in call["text"]
+    assert set(results) == set(pipeline.stage_order(slack_config))
+    assert results[LOCALIZE_STAGE].is_empty
+    assert results[STAGE].summary["skipped"] == "no input"
+    assert posted == []

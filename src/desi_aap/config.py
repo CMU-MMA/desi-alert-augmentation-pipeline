@@ -9,7 +9,14 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
-from desi_aap.boom import parse_timedelta
+from desi_aap.boom import (
+    ALERT_BAND_COLUMN,
+    ALERT_DEC_COLUMN,
+    ALERT_ID_COLUMN,
+    ALERT_MAG_COLUMN,
+    ALERT_RA_COLUMN,
+    parse_timedelta,
+)
 from desi_aap.gracedb_cache import GraceDbCache
 
 
@@ -81,7 +88,31 @@ class CrossmatchCatalogConfig(_Section):
     n_neighbors: int = Field(ge=1)
 
 
-class LocalizeConfig(_Section):
+class DistanceConfig(_Section):
+    """The ``[distance]`` section: how each alert's host redshift is chosen."""
+
+    # Smallest host redshift treated as a real measurement. Below this there is no usable
+    # luminosity distance: a z of 0 puts the alert at the origin, and a small negative one
+    # makes the coordinate conversion raise.
+    min_redshift: float = Field(default=0.0002, gt=0)
+
+
+class _FilterSection(_Section):
+    """Base for a filter's section: everything a filter has in common.
+
+    A filter selects candidates from the placed alerts and has its results
+    announced; see :mod:`desi_aap.stages.filters`. What they share is the switch
+    below, which is how one config runs the hourly search and another the
+    nightly one without either having to know what the other turns off.
+    """
+
+    # On by default, so a config that names a filter's settings at all gets that
+    # filter. Turning one off is the deliberate act, and it is written down in the
+    # overlay that does it.
+    enabled: bool = True
+
+
+class LocalizeConfig(_FilterSection):
     """The ``[localize]`` section: which superevents to score alerts against, and how."""
 
     # Required, because these three are what a result means: which events were
@@ -103,7 +134,6 @@ class LocalizeConfig(_Section):
     # TODO: check whether False is the right value here (inherited from notebook, but let's
     # explicitly confirm)
     require_2d_credible_level: bool = False
-    min_redshift: float = Field(default=0.0002, gt=0)
 
     @model_validator(mode="after")
     def _check_se_types(self) -> "LocalizeConfig":
@@ -186,12 +216,44 @@ class SlackConfig(_Section):
     # How many candidates the message lists before cutting off. At most 99:
     # Slack's table block holds 100 rows, and the header takes one.
     max_rows: int = Field(default=20, ge=1, le=99)
-    # Columns the message's table shows, in this order, skipping any the
-    # frame lacks. A nested column, or a `nested.field` path into one, shows
-    # the row's sub-rows one per line in a single cell.
-    columns: list[str] = ["objectId", "candidate.ra", "candidate.dec"]
+    # Columns every filter's table shows first, in this order, skipping any the
+    # frame lacks; a filter's own columns follow. A nested column, or a
+    # `nested.field` path into one, shows the row's sub-rows one per line in a
+    # single cell. The default is what identifies an alert, where to point a
+    # telescope, and how bright it was in which band -- the last two together,
+    # since a magnitude without its band is not a brightness anyone can act on.
+    columns: list[str] = [
+        ALERT_ID_COLUMN,
+        ALERT_RA_COLUMN,
+        ALERT_DEC_COLUMN,
+        ALERT_MAG_COLUMN,
+        ALERT_BAND_COLUMN,
+    ]
     # How many of a row's sub-rows a nested cell lists before cutting off.
     max_nested_rows: int = Field(default=3, ge=1)
+
+
+class FiltersConfig(_Section):
+    """The ``[filters]`` section: where the JSON filter definitions live.
+
+    Each ``<name>.json`` in ``dir`` defines one cut filter -- see
+    :mod:`desi_aap.stages.cut_filter` for the file's grammar -- and becomes its
+    own pipeline stage, with its own output directory and its own Slack
+    message. Adding a filter is dropping a file in; nothing else changes.
+    """
+
+    # Relative, like output_dir, so a fresh clone works anywhere: it follows
+    # the working directory, and the caveats under "Scheduled runs" in the
+    # README apply. A dir that does not exist simply contributes no filters,
+    # so a clone that deletes the shipped definitions still runs -- unless the
+    # path was set explicitly, in which case a missing dir is an error rather
+    # than a silently filter-less pipeline (see stages.cut_filter.load_cut_filters).
+    dir: Path = Path("filters")
+    # JSON filters to skip this run, by name. Here rather than in the JSON
+    # files because this is what the cadence overlays toggle, and only TOML
+    # rides the --config merge: hourly.toml can disable the nightly sweep's
+    # filters without editing any JSON.
+    disabled: list[str] = []
 
 
 class QueryConfig(_Section):
@@ -225,7 +287,12 @@ class PipelineConfig(_Section):
     run: RunConfig
     query: QueryConfig
     crossmatch: CrossmatchConfig = CrossmatchConfig()
+    # Defaulted, unlike [localize]: this section only tunes how a host is chosen, and
+    # its one setting is a guard on the arithmetic rather than a statement of what the
+    # search was. A config that says nothing about it still gets usable distances.
+    distance: DistanceConfig = DistanceConfig()
     localize: LocalizeConfig
+    filters: FiltersConfig = FiltersConfig()
     dask: DaskConfig = DaskConfig()
     gracedb: GraceDbConfig = GraceDbConfig()
     # Optional, unlike the sections above: a fresh clone has no Slack app or

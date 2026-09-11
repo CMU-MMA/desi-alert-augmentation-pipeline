@@ -10,11 +10,38 @@ import nested_pandas as npd
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "SlackDisplay",
     "StageInputs",
     "StageResult",
     "input_result",
     "write_frame",
 ]
+
+
+@dataclass(frozen=True)
+class SlackDisplay:
+    """How one filter stage's candidates are announced.
+
+    A filter decides what its own results are called and which of its columns
+    are worth reading in a chat client, so each filter module declares one of
+    these and :mod:`desi_aap.stages.slack_publish` stays generic.
+
+    Attributes
+    ----------
+    title : str
+        Names the candidates in the message header, as in "3 GW coincidence
+        candidates". A noun phrase, lowercase except for proper nouns, and
+        written so it reads with a count in front of it.
+    columns : tuple of str
+        Columns to show after the ones every filter shows (``[slack].columns``
+        in the config), in order. Each may be a flat column, a nested column,
+        or a ``nested.field`` path, as :func:`desi_aap.stages.slack_publish.format_message`
+        describes. A column the frame lacks is skipped rather than raising, so
+        a filter may name one that only some runs produce.
+    """
+
+    title: str
+    columns: tuple[str, ...] = ()
 
 
 @dataclass
@@ -25,7 +52,7 @@ class StageResult:
     ----------
     stage : str
         The stage that produced this, as it appears in
-        :data:`desi_aap.pipeline.STAGE_ORDER`.
+        :func:`desi_aap.pipeline.stage_order`.
     frame : nested_pandas.NestedFrame or None
         The table this stage produced. ``None`` when the stage had nothing to
         produce, such as a window that returned no alerts.
@@ -51,7 +78,10 @@ class StageResult:
 
         True both when the stage had nothing to produce (``frame`` is None) and
         when it produced an empty table -- an hour with no alerts, or alerts
-        that matched nothing. The run stops when a stage produces an empty input.
+        that matched nothing. A stage whose every input is empty is skipped
+        rather than run; see :func:`desi_aap.pipeline.run_pipeline`. Skipping
+        rather than stopping is what lets one filter find nothing without
+        silencing its siblings.
         """
         return self.frame is None or self.frame.empty
 
@@ -108,7 +138,7 @@ def input_result(inputs: StageInputs | None, producer: str) -> StageResult:
     if not inputs or producer not in inputs:
         raise KeyError(
             f"Stage {producer!r} has not run, so its output is not available. "
-            f"Stages run in desi_aap.pipeline.STAGE_ORDER; check that {producer!r} precedes "
+            f"Stages run in desi_aap.pipeline.stages_for order; check that {producer!r} precedes "
             "the stage consuming it."
         )
     result = inputs[producer]
