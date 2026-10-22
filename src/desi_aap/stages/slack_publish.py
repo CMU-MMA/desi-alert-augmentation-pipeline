@@ -1,10 +1,21 @@
-"""Post each run's matched alerts to a Slack channel.
+"""Post each filter's candidates to a Slack channel, one message per filter.
 
-The stage takes the frame the previous stage produced, renders it as a short
-message -- a header naming the run, how many candidates it found, the first
-``[slack].max_rows`` of them as a native Block Kit table, and a pointer to
-the full parquet output -- and posts it with the Slack Web API's
+Each filter in :func:`desi_aap.stages.filters.filter_descriptors` that found
+anything gets its own message -- a header naming the run and what the filter
+found, the first ``[slack].max_rows`` candidates as a native Block Kit table,
+and a pointer to the full parquet output -- posted with the Slack Web API's
 ``chat.postMessage``.
+
+One message per filter rather than one per run because the filters answer
+different questions and are read by different people: a GW coincidence wants
+looking at tonight, while a superluminous supernova candidate can wait for the
+morning. Each filter says how its own candidates are announced, via the
+:class:`~desi_aap.stages.base.SlackDisplay` its module declares, so this module
+never learns what any particular filter means.
+
+A filter that found nothing is passed over in silence rather than posting an
+empty message; a run where every filter found nothing posts nothing at all.
+That is the normal outcome for most hours, not a sign that anything is wrong.
 
 Posting needs a *bot token*: register an app on https://api.slack.com/apps
 with the ``chat:write`` scope, install it to the workspace, and put the
@@ -12,9 +23,6 @@ resulting ``xoxb-`` token in a TOML file (``bot_token = "xoxb-..."``) outside
 the repository. The ``[slack]`` section names that file, the channel, and the
 row cutoff; the section is optional, and the stage skips itself when it is
 absent. The bot must be invited to the channel once (``/invite @<bot>``).
-
-The pipeline stops before this stage when an earlier one produces no rows, so
-a run with nothing to report posts nothing by design.
 """
 
 import json
@@ -28,18 +36,24 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from desi_aap.config import PipelineConfig
-from desi_aap.stages.base import StageInputs, StageResult, input_result
-from desi_aap.stages.localize import STAGE as LOCALIZE_STAGE
+from desi_aap.stages.base import SlackDisplay, StageInputs, StageResult
+from desi_aap.stages.filters import FilterDescriptor, filter_descriptors
 from desi_aap.utils import run_stamp
 
 logger = logging.getLogger(__name__)
 
 STAGE = "slack_publish"
 
-# The stage whose frame gets published: the last data stage in
-# desi_aap.pipeline.STAGE_ORDER. As stages are added before this one, point
-# this at the new last data stage.
-INPUT_STAGE = LOCALIZE_STAGE
+# This stage requires every filter, and the filters come from the config --
+# each JSON file in the filters directory is one -- so its dependencies cannot
+# be a module constant. desi_aap.pipeline.stages_for builds them per run, from
+# the same filter_descriptors this module announces. It is also the one stage
+# that tolerates a required stage not having run: see run_slack_publish.
+#
+# Which columns every filter's table shows is likewise not a constant here but
+# `[slack].columns` in the config (see desi_aap.config.SlackConfig for the
+# default and why). Whatever else makes a particular filter's result worth
+# reading comes from its own SlackDisplay.columns, appended after those.
 
 
 def load_bot_token(path: Path) -> str:
@@ -179,23 +193,33 @@ def _column_cells(
 
 
 def format_message(
-    result: StageResult, max_rows: int, display_columns: list[str], max_nested_rows: int = 3
+    result: StageResult,
+    display: SlackDisplay,
+    max_rows: int,
+    display_columns: list[str],
+    max_nested_rows: int = 3,
 ) -> dict[str, Any]:
-    """Render a stage's non-empty frame as one Slack message.
+    """Render one filter's non-empty frame as one Slack message.
 
     Parameters
     ----------
     result : StageResult
         The result to publish. Its ``frame`` must have at least one row; the
         message also names its ``stamp`` and, when set, its ``output_path``.
+    display : desi_aap.stages.base.SlackDisplay
+        How this filter's candidates are named, and which of its own columns to
+        show after ``display_columns``, as its module declares.
     max_rows : int
         How many rows the table lists before cutting off.
     display_columns : list of str
-        Columns the table shows, in this order, normally ``[slack].columns``
-        from the config. Each may be a flat column, a nested column, or a
+        Columns every filter's table shows first, in this order, normally
+        ``[slack].columns`` from the config. Each -- and each of
+        ``display.columns`` -- may be a flat column, a nested column, or a
         ``nested.field`` path; the last two render the row's sub-rows as
         lines of one cell, as :func:`_column_cells` describes. A name the
-        frame lacks is skipped, with a warning.
+        frame lacks is skipped: with a warning when it came from the config,
+        which was written for every filter, and quietly when it came from the
+        filter, which may name a column only some runs produce.
     max_nested_rows : int
         How many sub-rows a nested cell lists before cutting off, normally
         ``[slack].max_nested_rows`` from the config.
@@ -212,21 +236,31 @@ def format_message(
     n_rows = len(frame)
 
     title = f"DESI Alert Augmentation Pipeline run {result.stamp}"
-    found = f"{n_rows} candidate{'' if n_rows == 1 else 's'} found"
+    plural = "" if n_rows == 1 else "s"
+    found = f"{n_rows} {display.title}{plural} found"
     cutoff = f". Showing the first {max_rows}:" if n_rows > max_rows else ":"
 
     # Each column is (name, its Block Kit cells, its column_settings entry).
     shown = frame.head(max_rows)
     columns = []
-    missing = []
-    for name in display_columns:
+    missing_configured = []
+    missing_filter = []
+    for name in (*display_columns, *display.columns):
         resolved = _column_cells(shown, name, max_nested_rows)
         if resolved is None:
-            missing.append(name)
+            (missing_configured if name in display_columns else missing_filter).append(name)
         else:
             columns.append((name, *resolved))
-    if missing:
-        logger.warning("Configured [slack] column(s) not in the frame, skipping: %s", ", ".join(missing))
+    if missing_configured:
+        logger.warning(
+            "Configured [slack] column(s) not in the frame, skipping: %s", ", ".join(missing_configured)
+        )
+    if missing_filter:
+        logger.info(
+            "Column(s) %s names that are not in its frame, skipping: %s",
+            display.title,
+            ", ".join(missing_filter),
+        )
 
     # Flat cells are raw_text holding our own formatting: as of 2026-08
     # Slack's validator rejects the raw_number cells its docs describe (it
@@ -297,8 +331,9 @@ def run_slack_publish(
     dry_run: bool = False,
     inputs: StageInputs | None = None,
     stamp: str | None = None,
+    descriptors: tuple[FilterDescriptor, ...] | None = None,
 ) -> StageResult:
-    """Run the stage: render the previous stage's frame and post it to Slack.
+    """Run the stage: post one message for each filter that found something.
 
     Parameters
     ----------
@@ -306,56 +341,132 @@ def run_slack_publish(
         The pipeline configuration. Without a ``[slack]`` section the stage
         logs that it is skipping and posts nothing.
     dry_run : bool
-        Build the message and log it instead of posting it. Also the way to
+        Build each message and log it instead of posting it. Also the way to
         preview the formatting without a workspace.
     inputs : dict of str to StageResult, optional
-        Results of the stages that already ran. The frame to publish comes
-        from :data:`INPUT_STAGE`.
+        Results of the stages that already ran. The frames to publish come from
+        the filters in :func:`desi_aap.stages.filters.filter_descriptors`. A filter
+        that was switched off or skipped this run is passed over, since the
+        pipeline records an empty result for it either way.
     stamp : str, optional
         This run's timestamp. Defaults to now.
+    descriptors : tuple of FilterDescriptor, optional
+        The filters to announce. The pipeline binds the ones the run was built
+        from, so the stage set cannot drift between building the run and
+        announcing it -- a filter file edited or deleted mid-run changes the
+        *next* run. Left out (a direct call), they are read from the config.
 
     Returns
     -------
     StageResult
-        The input frame, passed through unchanged so this stage never reads
-        as the one that ended the run; ``summary["posted"]`` says whether a
-        message went out.
+        ``frame`` is ``None``: this stage announces results rather than
+        producing any, and nothing runs after it. ``summary`` holds
+        ``n_posted``, how many messages went out, and ``rows_by_filter``, the
+        candidate count of every filter that has a result -- zero included, so
+        that a filter which ran and found nothing is told apart from one that
+        never ran.
 
     Raises
     ------
     KeyError
-        If :data:`INPUT_STAGE` has not run.
+        If a filter has no entry in ``inputs`` at all. Every run records a
+        result for every filter -- a skipped one gets a ``skipped`` summary --
+        so an absent entry means the inputs were mis-keyed, and treating that
+        as "found nothing" would silently drop real candidates.
     ValueError
         If the credentials file is missing or malformed.
     RuntimeError
-        If Slack rejects the message.
+        If Slack rejects any message. The filters that posted successfully stay
+        posted, and the error names every one that did not.
     """
     stamp = stamp or run_stamp()
-    upstream = input_result(inputs, INPUT_STAGE)
-    frame = upstream.frame
-    summary = {"posted": False, "n_rows": 0 if frame is None else len(frame)}
-    result = StageResult(stage=STAGE, frame=frame, stamp=stamp, summary=summary)
+    if descriptors is None:
+        descriptors = filter_descriptors(cfg)
+
+    # Every filter that ran, and how many candidates it contributed --
+    # including the ones that contributed none, so the summary distinguishes a
+    # filter that ran and found nothing from one that was switched off or
+    # skipped. The skipped ones are absent from the counts and named in the
+    # log, because "the GW search was off" and "the GW search found nothing"
+    # must not read the same.
+    rows_by_filter: dict[str, int] = {}
+    published: list[tuple[FilterDescriptor, StageResult]] = []
+    for descriptor in descriptors:
+        result = (inputs or {}).get(descriptor.stage)
+        if result is None:
+            raise KeyError(
+                f"Filter {descriptor.stage!r} has no result in this run's inputs. Every run "
+                "records one, even for a skipped filter, so a missing entry means the inputs "
+                "are mis-keyed rather than that the filter found nothing."
+            )
+        if result.summary.get("skipped"):
+            logger.info("Filter %r did not run (%s).", descriptor.stage, result.summary["skipped"])
+            continue
+        rows_by_filter[descriptor.stage] = 0 if result.frame is None else len(result.frame)
+        if result.is_empty:
+            logger.info("Filter %r found nothing to publish.", descriptor.stage)
+            continue
+        published.append((descriptor, result))
+
+    summary: dict[str, Any] = {"n_posted": 0, "rows_by_filter": rows_by_filter}
+    outcome = StageResult(stage=STAGE, frame=None, stamp=stamp, summary=summary)
 
     if cfg.slack is None:
         logger.info("No [slack] section configured; skipping.")
-        return result
-    if frame is None or frame.empty:
-        logger.info("No rows to publish; posting nothing.")
-        return result
+        return outcome
+    if not published:
+        logger.info("No filter produced candidates; posting nothing.")
+        return outcome
 
-    message = format_message(upstream, cfg.slack.max_rows, cfg.slack.columns, cfg.slack.max_nested_rows)
-    if dry_run:
-        logger.info(
-            "Dry run: not posting to Slack. %s Blocks payload:\n%s",
-            message["text"],
-            json.dumps(message["blocks"], indent=2),
+    # Each filter is posted on its own, and one Slack rejection does not stop
+    # the rest: the filters are independent, and a rate limit hit while
+    # announcing the first is no reason to withhold the second. The failures are
+    # collected and raised together at the end, so the run still fails loudly
+    # rather than reporting a partial post as a success.
+    token = None if dry_run else load_bot_token(cfg.slack.credentials)
+    failed_filters: list[str] = []
+    failures: list[str] = []
+    for descriptor, result in published:
+        message = format_message(
+            result,
+            descriptor.slack_display,
+            cfg.slack.max_rows,
+            cfg.slack.columns,
+            cfg.slack.max_nested_rows,
         )
-        return result
+        if dry_run:
+            logger.info(
+                "Dry run: not posting %r to Slack. %s Blocks payload:\n%s",
+                descriptor.stage,
+                message["text"],
+                json.dumps(message["blocks"], indent=2),
+            )
+            continue
+        try:
+            post_message(token, cfg.slack.channel, message["text"], message["blocks"])
+        # Not just the RuntimeError post_message wraps Slack's rejections in:
+        # a transport-level error (SSL, connection reset, DNS) raises something
+        # else entirely, and one filter's network mishap is no more a reason to
+        # withhold its siblings' messages than a rejection is.
+        except Exception as exc:
+            logger.error("Could not post %r to %s: %s", descriptor.stage, cfg.slack.channel, exc)
+            failed_filters.append(descriptor.stage)
+            failures.append(f"{descriptor.stage}: {exc}")
+            continue
+        summary["n_posted"] += 1
+        logger.info(
+            "Posted %d of %d %s row(s) to %s.",
+            min(len(result.frame), cfg.slack.max_rows),
+            len(result.frame),
+            descriptor.stage,
+            cfg.slack.channel,
+        )
 
-    token = load_bot_token(cfg.slack.credentials)
-    post_message(token, cfg.slack.channel, message["text"], message["blocks"])
-    summary["posted"] = True
-    logger.info(
-        "Posted %d of %d row(s) to %s.", min(len(frame), cfg.slack.max_rows), len(frame), cfg.slack.channel
-    )
-    return result
+    summary["failed_filters"] = failed_filters
+    if failures:
+        logger.info("Slack summary: %s", summary)
+        raise RuntimeError(
+            f"Posted {summary['n_posted']} of {len(published)} filter message(s); "
+            f"{len(failures)} failed. {' | '.join(failures)}"
+        )
+    return outcome

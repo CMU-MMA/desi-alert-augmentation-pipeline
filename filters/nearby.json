@@ -1,0 +1,8 @@
+{
+  "title": "nearby transient candidate",
+  "description": "Anything within 750 Mpc (SHOES) is close enough to be worth noting regardless of what it is.",
+  "columns": ["dist_mpc_SHOES", "abs_mag_SHOES", "host_redshift"],
+  "cuts": [
+    {"column": "dist_mpc_SHOES", "max": 750.0}
+  ]
+}

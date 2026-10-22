@@ -46,12 +46,51 @@ radius_arcsec = 5.0
 n_neighbors = 1
 
 # ===========================================================================
-# Stage: localize -- score the matched alerts against GW event localizations.
-# Each alert takes its distance from the nearest DESI host matched above, and
-# is kept if it lands inside a superevent's 3D credible volume.
+# Stage: distance -- put each matched alert at a distance, using the nearest
+# DESI host the crossmatch attached to it. Every filter below is a cut on that
+# distance in some form, so it is chosen once, here, before any of them run.
+# An alert with no usable host has no distance and leaves the run at this point.
 # ===========================================================================
 
+[distance]
+# Smallest host redshift treated as a real measurement. Below this there is no
+# usable luminosity distance: a z of 0 puts the alert at the origin, and a
+# small negative one makes the coordinate conversion raise.
+min_redshift = 0.0002
+
+# ===========================================================================
+# Filters. Each reads the placed alerts above and keeps the ones interesting
+# for one reason; each has its own Slack message. They are siblings, so one
+# finding nothing does not stop the others.
+#
+# Filters come in two kinds. Cut filters are JSON files in the directory below,
+# one file per filter -- drop one in and the next run picks it up; see the
+# shipped filters/luminous.json and filters/nearby.json, and the grammar in
+# desi_aap.stages.cut_filter. Code filters, which measure something (the GW
+# localization match below), are Python modules with their own section here.
+#
+# Which filters a run skips is how one config runs the hourly search and
+# another the nightly one -- see "Scheduled runs" in the README. Every filter
+# is on unless a config says otherwise.
+# ===========================================================================
+
+[filters]
+# Where the JSON filter definitions live. Relative, like output_dir, so it
+# follows the working directory; the shipped definitions are in the repo.
+dir = "filters"
+# Filters to skip this run, by name -- a JSON filter's filename without .json,
+# or a code filter's stage name. This is the knob the cadence overlays turn,
+# since JSON does not ride the --config merge: e.g. an hourly overlay sets
+# disabled = ["luminous", "nearby"] and leaves the nightly sweep to run them.
+disabled = []
+
+# ---------------------------------------------------------------------------
+# Filter: localize -- alerts consistent with a GW event localization. Kept if
+# the alert lands inside a superevent's 3D credible volume.
+# ---------------------------------------------------------------------------
+
 [localize]
+enabled = true
 # --- Required: what search this is. No defaults, because these three are what a
 # result means, and only credible_level is recorded in the stage's output.
 
@@ -81,16 +120,12 @@ min_classification_prob_sum = 0.9
 # 3D coincidences -- an alert whose sky position is unremarkable but whose
 # distance lands on a high-density slice of the distance posterior.
 require_2d_credible_level = false
-# Smallest host redshift treated as a real measurement. Below this there is no
-# usable luminosity distance: a z of 0 puts the alert at the origin, and a
-# small negative one makes the coordinate conversion raise.
-min_redshift = 0.0002
 
 # ===========================================================================
-# Stage: slack_publish -- post the run's matched alerts to a Slack channel.
-# Optional: without this section the stage skips itself, so a fresh clone
-# runs with no Slack app. The pipeline stops before this stage when an
-# earlier one produces no rows, so an empty run posts nothing.
+# Stage: slack_publish -- post each filter's candidates to a Slack channel,
+# one message per filter. Optional: without this section the stage skips
+# itself, so a fresh clone runs with no Slack app. A filter that found nothing
+# is passed over, and a run where every filter found nothing posts nothing.
 # ===========================================================================
 
 # [slack]
@@ -100,10 +135,11 @@ min_redshift = 0.0002
 # channel = "#desi-alerts"
 # # Candidates listed in the message before it cuts off.
 # max_rows = 20
-# # Columns the message's table shows, in this order; one the results lack is
-# # skipped. A nested column, or a `nested.field` path into one, lists the
-# # row's sub-rows one per line in a single cell.
-# columns = ["objectId", "candidate.ra", "candidate.dec"]
+# # Columns every filter's table shows first, in this order; one the results
+# # lack is skipped, and the filter's own columns follow. A nested column, or a
+# # `nested.field` path into one, lists the row's sub-rows one per line in a
+# # single cell.
+# columns = ["objectId", "candidate.ra", "candidate.dec", "candidate.magpsf", "candidate.band"]
 # # Sub-rows a nested cell lists before it cuts off.
 # max_nested_rows = 3
 
