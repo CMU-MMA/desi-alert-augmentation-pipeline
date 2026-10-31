@@ -10,6 +10,9 @@ import logging
 from datetime import timedelta
 from pathlib import Path
 
+import nested_pandas as npd
+import pandas as pd
+import pyarrow as pa
 from astropy.time import Time
 
 from desi_aap import boom
@@ -71,6 +74,73 @@ def resolve_window(
     return start_jd, end_jd
 
 
+def query_surveys(
+    cfg: PipelineConfig, start_jd: float, end_jd: float
+) -> tuple[npd.NestedFrame, dict[str, int]]:
+    """Query every configured survey over one window and combine the alerts.
+
+    Each survey is asked with its own pipeline and permissions, its columns are
+    renamed as configured, and every row is tagged with the survey it came from
+    (:data:`desi_aap.boom.ALERT_SURVEY_COLUMN`). The frames are then stacked;
+    a column one survey lacks is missing (NaN, or no sub-rows) on its rows.
+
+    Parameters
+    ----------
+    cfg : desi_aap.config.PipelineConfig
+        Read for ``[query.boom]``.
+    start_jd, end_jd : float
+        The window, as :func:`resolve_window` returns it.
+
+    Returns
+    -------
+    nested_pandas.NestedFrame
+        Every survey's alerts, indexed from zero. Empty when none returned any.
+    dict of str to int
+        How many alerts each survey returned, in query order.
+    """
+    settings = cfg.query.boom
+    frames = []
+    counts: dict[str, int] = {}
+    for survey in settings.survey_list:
+        pipeline_path = settings.pipelines.get(survey)
+        kwargs = {"start": start_jd, "end": end_jd, "survey": survey, "limit": settings.limit}
+        if pipeline_path is not None:
+            kwargs["pipeline"] = boom.load_pipeline(pipeline_path)
+        if survey in settings.permissions:
+            kwargs["permissions"] = {survey: list(settings.permissions[survey])}
+        frame = boom.query_alerts(**kwargs)
+        counts[survey] = len(frame)
+        logger.info(
+            "BOOM returned %d %s alerts%s.",
+            len(frame),
+            survey,
+            f" ({pipeline_path})" if pipeline_path else "",
+        )
+        if frame.empty:
+            continue
+        renames = settings.renames.get(survey, {})
+        clashes = sorted(new for old, new in renames.items() if old in frame.columns and new in frame.columns)
+        if clashes:
+            raise ValueError(
+                f"[query.boom.renames.{survey}] would overwrite column(s) {', '.join(clashes)} that "
+                f"BOOM already returned for {survey}; drop them from the pipeline's projection or "
+                "rename to something else."
+            )
+        frame = frame.rename(columns=renames)
+        # Arrow-backed, as the other string columns are, so the frame equals
+        # its own parquet round trip.
+        frame[boom.ALERT_SURVEY_COLUMN] = pd.Series(
+            survey, index=frame.index, dtype=pd.ArrowDtype(pa.large_string())
+        )
+        frames.append(frame)
+
+    if not frames:
+        return npd.NestedFrame(), counts
+    if len(frames) == 1:
+        return frames[0], counts
+    return npd.NestedFrame(pd.concat(frames, ignore_index=True)), counts
+
+
 def run_query(
     cfg: PipelineConfig,
     *,
@@ -106,18 +176,19 @@ def run_query(
     start_jd, end_jd = resolve_window(window.start, window.end, lookback=window.lookback)
     logger.info(
         "Querying BOOM for %s alerts in JD [%.6f, %.6f] (%s to %s UTC).",
-        cfg.query.boom.survey,
+        ", ".join(cfg.query.boom.survey_list),
         start_jd,
         end_jd,
         Time(start_jd, format="jd").isot,
         Time(end_jd, format="jd").isot,
     )
 
-    query = cfg.query.boom
-    alerts = boom.query_alerts(start=start_jd, end=end_jd, survey=query.survey, limit=query.limit)
+    alerts, per_survey = query_surveys(cfg, start_jd, end_jd)
     logger.info("BOOM returned %d alerts.", len(alerts))
 
     summary = {"n_alerts": len(alerts), "start_jd": start_jd, "end_jd": end_jd}
+    if len(per_survey) > 1:
+        summary["n_alerts_by_survey"] = per_survey
 
     if alerts.empty:
         logger.info("No alerts in this window; writing nothing.")

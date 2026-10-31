@@ -1,0 +1,14 @@
+# SCOTTY750, hourly, on a Bridges-2 compute node through Slurm.
+#   Install:  scrontab scripts/scotty750.scrontab   (replaces your scrontab)
+#   Check:    scrontab -l ; squeue --me
+#   Remove:   scrontab -r
+# Each run's pipeline log is under output/scotty750/logs/; this file only
+# catches what happens before the pipeline starts logging.
+#SCRON --job-name=scotty750
+#SCRON --partition=RM-shared
+#SCRON --account=phy250012p
+#SCRON --ntasks-per-node=4
+#SCRON --time=00:50:00
+#SCRON --output=/ocean/projects/phy250012p/xhall/GitHub/desi-alert-augmentation-pipeline/output/scotty750/scron.log
+#SCRON --open-mode=append
+5 * * * * /ocean/projects/phy250012p/xhall/GitHub/desi-alert-augmentation-pipeline/scripts/scotty750_hourly.sh

@@ -439,7 +439,9 @@ def test_the_stage_runs_last_and_a_quiet_run_reaches_it(slack_config, stub_boom,
 
     results = pipeline.run_pipeline(slack_config, stamp=STAMP)
 
-    assert list(results)[-1] == STAGE
+    # Last of the stages that announce; only fritz_save, which saves rather than
+    # announces, comes after it.
+    assert list(results)[-2:] == [STAGE, "fritz_save"]
     assert set(results) == set(pipeline.stage_order(slack_config))
     assert results[LOCALIZE_STAGE].is_empty
     assert results[STAGE].summary["skipped"] == "no input"

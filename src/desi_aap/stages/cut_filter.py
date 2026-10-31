@@ -81,8 +81,8 @@ OUTPUT_PREFIX = "candidates"
 # an output directory, and a key in run summaries, so a collision with any of
 # these would make two different things answer to one name.
 RESERVED_NAMES = frozenset(
-    {"query", "crossmatch", "distance", "localize", "slack_publish"}
-    | {"run", "dask", "gracedb", "slack", "filters", "logs"}
+    {"query", "crossmatch", "distance", "localize", "scotty750", "slack_publish", "fritz_save"}
+    | {"run", "dask", "gracedb", "slack", "fritz", "filters", "logs"}
 )
 
 

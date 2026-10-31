@@ -393,6 +393,11 @@ def run_slack_publish(
     published: list[tuple[FilterDescriptor, StageResult]] = []
     for descriptor in descriptors:
         result = (inputs or {}).get(descriptor.stage)
+        if result is None and not descriptor.enabled:
+            # Switched off and never reached -- a run started after it with
+            # --from-stage. Off is off whether or not the run recorded it.
+            logger.info("Filter %r did not run (disabled).", descriptor.stage)
+            continue
         if result is None:
             raise KeyError(
                 f"Filter {descriptor.stage!r} has no result in this run's inputs. Every run "

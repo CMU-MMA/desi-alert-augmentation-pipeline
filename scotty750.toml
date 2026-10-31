@@ -1,0 +1,118 @@
+# SCOTTY750 -- the hourly nuclear-TDE search, saved to the Fritz group.
+#
+#   desi-aap run -c config.toml -c scotty750.toml
+#
+# Layered over config.toml: it widens the query to ZTF, LSST and DECam with the
+# SCOTTY750 BOOM pipelines, adds the DR11 photo-z catalog as a redshift
+# fallback, switches the GW search and the other filters off, and saves what
+# the SCOTTY750 screen keeps to Fritz. See "SCOTTY750" in the README.
+
+[run]
+output_dir = "output/scotty750"
+
+# Sized for the 4-core, 7 GB VM it runs on: an hour's nuclear alerts touch a
+# few catalog partitions, so two small workers are plenty.
+[dask]
+n_workers = 2
+threads_per_worker = 1
+memory_limit = "1.5GB"
+
+# ---------------------------------------------------------------------------
+# Query: one pipeline per survey, under pipelines/scotty750/. Each is the
+# survey's bogus/star/asteroid/AGN rejection plus the nuclear cut -- within
+# 0.5" of an extended Legacy Survey DR10 source for ZTF, 0.3" of a non-stellar
+# LSPSC source for LSST and DECam -- and a final $project that gives every
+# survey the same columns, including the `lc` light curve the color cut reads.
+# ---------------------------------------------------------------------------
+
+[query.boom]
+surveys = ["ZTF", "LSST", "DECAM"]
+
+[query.boom.pipelines]
+ZTF = "pipelines/scotty750/ztf.json"
+LSST = "pipelines/scotty750/lsst.json"
+DECAM = "pipelines/scotty750/decam.json"
+
+# ZTF alerts are scoped by programid: 1 public, 2 partnership.
+[query.boom.permissions]
+ZTF = [1, 2]
+
+# DECam alerts carry an aperture magnitude and no PSF one.
+[query.boom.renames.DECAM]
+"candidate.magap" = "candidate.magpsf"
+
+[query.window]
+# Three hours, run every hour: alerts can reach BOOM after the hour they were
+# taken in, and every Fritz step is safe to repeat, so overlapping windows cost
+# a few repeated requests rather than a missed candidate.
+lookback = "3h"
+
+# ---------------------------------------------------------------------------
+# Crossmatch: DESI DR1 and DR2 from config.toml (only the columns read here),
+# plus the DR11 photo-z catalog, built by scripts/import_dr11_photoz.py. Its Z
+# is the DESI spectroscopic redshift where it has a good one (Loa = DR2,
+# Matterhorn = Y5), else the photo-z.
+# ---------------------------------------------------------------------------
+
+[crossmatch.catalogs.desi_dr1]
+columns = ["TARGETID", "Z", "ZWARN", "SPECTYPE"]
+
+[crossmatch.catalogs.desi_dr2]
+columns = ["TARGETID", "Z", "ZWARN", "SPECTYPE"]
+
+[crossmatch.catalogs.dr11_photoz]
+catalog = "/ocean/projects/phy250012p/shared/3DTS/DESI/dr11_photoz/dr11_photoz"
+columns = ["ls_id", "Z", "Z_ERR", "Z_KIND", "Z_OK", "SPECTYPE", "TYPE"]
+radius_arcsec = 2.0
+n_neighbors = 1
+
+[crossmatch.catalogs.dr11_photoz.redshift]
+column = "Z"
+error_column = "Z_ERR"
+ok_column = "Z_OK"
+ok_value = true
+kind_column = "Z_KIND"
+spectype_column = "SPECTYPE"
+
+[distance]
+# A DESI spectrum of the host beats the photo-z of the same galaxy when it sits
+# at most this much farther from the alert.
+spec_preference_arcsec = 0.5
+
+# ---------------------------------------------------------------------------
+# Filters: only SCOTTY750 runs here. The GW search runs in the main config.
+# ---------------------------------------------------------------------------
+
+[localize]
+enabled = false
+
+[filters]
+disabled = ["luminous", "nearby"]
+
+[scotty750]
+max_dist_mpc = 750.0
+cosmology = "SHOES"
+max_host_sep_arcsec = 1.0
+max_g_minus_r = 0.0
+color_max_dt_days = 1.0
+require_color = true
+veto_qso_hosts = true
+max_quiet_gap_days = 90.0
+
+# LSST rarely takes g and r on the same night, so its colors come from
+# detections up to a week apart. ZTF keeps the one-day window above.
+[scotty750.color_max_dt_days_by_survey]
+LSST = 7.0
+
+# ---------------------------------------------------------------------------
+# Fritz: save the candidates to SCOTTY750 (group 2064) through the BOOM broker,
+# set a redshift where the source has none, and keep one annotation current.
+# The token comes from $FRITZ_TOKEN.
+# ---------------------------------------------------------------------------
+
+[fritz]
+group_ids = [2064]
+broker_id = 1
+filters = ["scotty750"]
+annotation_origin = "DESI_AAP"
+set_redshift = true

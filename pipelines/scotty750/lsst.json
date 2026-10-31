@@ -1,0 +1,1186 @@
+[
+  {
+    "$match": {
+      "$and": [
+        {
+          "candidate.reliability": {
+            "$gt": 0.5
+          }
+        },
+        {
+          "candidate.isdiffpos": {
+            "$eq": true
+          }
+        },
+        {
+          "candidate.ndethist": {
+            "$lt": 200
+          }
+        },
+        {
+          "properties.stationary": {
+            "$eq": true
+          }
+        },
+        {
+          "properties.near_brightstar": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.shape_flag": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.centroid_flag": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.pixelFlags": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.pixelFlags_saturatedCenter": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.ssObjectId": {
+            "$exists": false
+          }
+        },
+        {
+          "candidate.snr_psf": {
+            "$gt": 3
+          }
+        },
+        {
+          "candidate.psfFlux_flag_edge": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.apFlux_flag": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.pixelFlags_bad": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.pixelFlags_cr": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.pixelFlags_saturated": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.pixelFlags_nodata": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.pixelFlags_streak": {
+            "$eq": false
+          }
+        },
+        {
+          "candidate.glint_trail": {
+            "$eq": false
+          }
+        },
+        {
+          "$or": [
+            {
+              "coordinates.b": {
+                "$gte": 7
+              }
+            },
+            {
+              "coordinates.b": {
+                "$lte": -7
+              }
+            }
+          ]
+        },
+        {
+          "properties.star": {
+            "$eq": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "$addFields": {
+      "nuclear_sep_arcsec": {
+        "$min": {
+          "$map": {
+            "input": {
+              "$filter": {
+                "input": {
+                  "$ifNull": [
+                    "$cross_matches.LSPSC",
+                    []
+                  ]
+                },
+                "cond": {
+                  "$not": [
+                    {
+                      "$gte": [
+                        "$$this.score",
+                        0.7
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            "in": "$$this.distance_arcsec"
+          }
+        }
+      }
+    }
+  },
+  {
+    "$match": {
+      "nuclear_sep_arcsec": {
+        "$gte": 0,
+        "$lte": 0.3
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "any_gaia_brightstar": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.Gaia_DR3",
+                []
+              ]
+            },
+            "in": {
+              "$and": [
+                {
+                  "$lte": [
+                    "$$this.distance_arcsec",
+                    20
+                  ]
+                },
+                {
+                  "$lte": [
+                    "$$this.phot_g_mean_mag",
+                    16
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "star_lspsc": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.LSPSC",
+                []
+              ]
+            },
+            "in": {
+              "$and": [
+                {
+                  "$gte": [
+                    "$$this.score",
+                    0.7
+                  ]
+                },
+                {
+                  "$or": [
+                    {
+                      "$and": [
+                        {
+                          "$lte": [
+                            "$$this.distance_arcsec",
+                            4
+                          ]
+                        },
+                        {
+                          "$lte": [
+                            "$$this.mag_white",
+                            18
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "$lte": [
+                            "$$this.distance_arcsec",
+                            10
+                          ]
+                        },
+                        {
+                          "$lte": [
+                            "$$this.mag_white",
+                            16
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "$lte": [
+                            "$$this.distance_arcsec",
+                            30
+                          ]
+                        },
+                        {
+                          "$lte": [
+                            "$$this.mag_white",
+                            15
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "$lte": [
+                            "$$this.distance_arcsec",
+                            6
+                          ]
+                        },
+                        {
+                          "$lte": [
+                            "$$this.mag_white",
+                            17.5
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "Gaia_High_PM_SNR3": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.Gaia_DR3",
+                []
+              ]
+            },
+            "in": {
+              "$and": [
+                {
+                  "$gt": [
+                    "$$this.pm",
+                    3
+                  ]
+                },
+                {
+                  "$gt": [
+                    {
+                      "$divide": [
+                        "$$this.pm",
+                        {
+                          "$sqrt": {
+                            "$add": [
+                              {
+                                "$pow": [
+                                  "$$this.pmra_error",
+                                  2
+                                ]
+                              },
+                              {
+                                "$pow": [
+                                  "$$this.pmdec_error",
+                                  2
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    },
+                    5
+                  ]
+                },
+                {
+                  "$lt": [
+                    {
+                      "$abs": {
+                        "$subtract": [
+                          "$candidate.ra",
+                          "$$this.ra"
+                        ]
+                      }
+                    },
+                    0.000277778
+                  ]
+                },
+                {
+                  "$lt": [
+                    {
+                      "$abs": {
+                        "$subtract": [
+                          "$candidate.dec",
+                          "$$this.dec"
+                        ]
+                      }
+                    },
+                    0.000277778
+                  ]
+                },
+                {
+                  "$lte": [
+                    "$$this.phot_g_mean_mag",
+                    19.5
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "Is_Quasar": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.milliquas_v8",
+                []
+              ]
+            },
+            "in": {
+              "$in": [
+                "$$this.objtype",
+                [
+                  "Q",
+                  "Q2",
+                  "Q2X",
+                  "QR",
+                  "QR2",
+                  "QR2X",
+                  "QRX",
+                  "QX"
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "gaia_snr_gt5": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.Gaia_DR3",
+                []
+              ]
+            },
+            "in": {
+              "$gt": [
+                {
+                  "$abs": {
+                    "$divide": [
+                      "$$this.parallax",
+                      "$$this.parallax_error"
+                    ]
+                  }
+                },
+                5
+              ]
+            }
+          }
+        }
+      },
+      "WiseW1W2_gt1": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.CatWISE2020",
+                []
+              ]
+            },
+            "in": {
+              "$gt": [
+                {
+                  "$subtract": [
+                    "$$this.w1mpro",
+                    "$$this.w2mpro"
+                  ]
+                },
+                0.5
+              ]
+            }
+          }
+        }
+      },
+      "sep_gt_0_1d": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$prv_candidates",
+                []
+              ]
+            },
+            "in": {
+              "$gte": [
+                {
+                  "$subtract": [
+                    "$candidate.jd",
+                    "$$this.jd"
+                  ]
+                },
+                0.2
+              ]
+            }
+          }
+        }
+      },
+      "TwoMass_Red_Star_IR_v2": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.2MASS_PSC",
+                []
+              ]
+            },
+            "in": {
+              "$and": [
+                {
+                  "$lte": [
+                    {
+                      "$sqrt": {
+                        "$add": [
+                          {
+                            "$pow": [
+                              {
+                                "$abs": {
+                                  "$subtract": [
+                                    "$candidate.ra",
+                                    "$$this.ra"
+                                  ]
+                                }
+                              },
+                              2
+                            ]
+                          },
+                          {
+                            "$pow": [
+                              {
+                                "$abs": {
+                                  "$subtract": [
+                                    "$candidate.dec",
+                                    "$$this.dec"
+                                  ]
+                                }
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    0.00027
+                  ]
+                },
+                {
+                  "$gt": [
+                    {
+                      "$subtract": [
+                        "$$this.h_m",
+                        "$$this.k_m"
+                      ]
+                    },
+                    -0.2
+                  ]
+                },
+                {
+                  "$lt": [
+                    {
+                      "$subtract": [
+                        "$$this.h_m",
+                        "$$this.k_m"
+                      ]
+                    },
+                    0.4
+                  ]
+                },
+                {
+                  "$lt": [
+                    {
+                      "$subtract": [
+                        "$$this.j_m",
+                        "$$this.k_m"
+                      ]
+                    },
+                    0.6
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "jd_min_prv": {
+        "$min": "$prv_candidates.jd"
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "prv_cands_90_bin_hist_arr": {
+        "$filter": {
+          "input": {
+            "$ifNull": [
+              "$prv_candidates",
+              []
+            ]
+          },
+          "cond": {
+            "$and": [
+              {
+                "$gt": [
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      "$jd_min_prv"
+                    ]
+                  },
+                  150
+                ]
+              },
+              {
+                "$eq": [
+                  "$$this.isdiffpos",
+                  true
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.magpsf",
+                  0
+                ]
+              },
+              {
+                "$lt": [
+                  "$$this.magpsf",
+                  24
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "dets_jd_btw_90_180": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      90
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      180
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_180_270": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      180
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      270
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_270_360": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      270
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      360
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_360_450": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      360
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      450
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_450_540": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      450
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      540
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_540_630": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      540
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      630
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_630_720": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      630
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      720
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_720_810": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      720
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      810
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_810_900": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      810
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      900
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "$match": {
+      "$and": [
+        {
+          "any_gaia_brightstar": {
+            "$eq": false
+          }
+        },
+        {
+          "star_lspsc": {
+            "$eq": false
+          }
+        },
+        {
+          "sep_gt_0_1d": {
+            "$eq": true
+          }
+        },
+        {
+          "Gaia_High_PM_SNR3": {
+            "$eq": false
+          }
+        },
+        {
+          "Is_Quasar": {
+            "$eq": false
+          }
+        },
+        {
+          "gaia_snr_gt5": {
+            "$eq": false
+          }
+        },
+        {
+          "TwoMass_Red_Star_IR_v2": {
+            "$eq": false
+          }
+        },
+        {
+          "$nor": [
+            {
+              "$and": [
+                {
+                  "WiseW1W2_gt1": {
+                    "$eq": true
+                  }
+                },
+                {
+                  "$and": [
+                    {
+                      "prv_cands_90_bin_hist_arr.50": {
+                        "$exists": true
+                      }
+                    },
+                    {
+                      "$or": [
+                        {
+                          "$and": [
+                            {
+                              "dets_jd_btw_90_180.10": {
+                                "$exists": true
+                              }
+                            },
+                            {
+                              "dets_jd_btw_180_270.10": {
+                                "$exists": true
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "$and": [
+                            {
+                              "dets_jd_btw_180_270.10": {
+                                "$exists": true
+                              }
+                            },
+                            {
+                              "dets_jd_btw_270_360.10": {
+                                "$exists": true
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "$and": [
+                            {
+                              "dets_jd_btw_270_360.10": {
+                                "$exists": true
+                              }
+                            },
+                            {
+                              "dets_jd_btw_360_450.10": {
+                                "$exists": true
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "$and": [
+                            {
+                              "dets_jd_btw_360_450.10": {
+                                "$exists": true
+                              }
+                            },
+                            {
+                              "dets_jd_btw_450_540.10": {
+                                "$exists": true
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "$and": [
+                            {
+                              "dets_jd_btw_450_540.10": {
+                                "$exists": true
+                              }
+                            },
+                            {
+                              "dets_jd_btw_540_630.10": {
+                                "$exists": true
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "$and": [
+                            {
+                              "dets_jd_btw_540_630.10": {
+                                "$exists": true
+                              }
+                            },
+                            {
+                              "dets_jd_btw_630_720.10": {
+                                "$exists": true
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "$and": [
+                            {
+                              "dets_jd_btw_630_720.10": {
+                                "$exists": true
+                              }
+                            },
+                            {
+                              "dets_jd_btw_720_810.10": {
+                                "$exists": true
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "$and": [
+                            {
+                              "dets_jd_btw_720_810.10": {
+                                "$exists": true
+                              }
+                            },
+                            {
+                              "dets_jd_btw_810_900.10": {
+                                "$exists": true
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "$expr": {
+            "$isNumber": "$candidate.extendedness"
+          }
+        },
+        {
+          "$or": [
+            {
+              "$expr": {
+                "$lt": [
+                  {
+                    "$divide": [
+                      "$candidate.psfChi2",
+                      "$candidate.psfNdata"
+                    ]
+                  },
+                  1.1
+                ]
+              }
+            },
+            {
+              "candidate.snr_psf": {
+                "$gt": 50
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "$project": {
+      "objectId": 1,
+      "candidate.ra": 1,
+      "candidate.dec": 1,
+      "candidate.jd": 1,
+      "candidate.band": 1,
+      "candidate.magpsf": 1,
+      "nuclear_sep_arcsec": 1,
+      "properties.episode_history.n_episodes": 1,
+      "properties.episode_history.longest_quiet_days": 1,
+      "lc": {
+        "$map": {
+          "input": {
+            "$filter": {
+              "input": {
+                "$concatArrays": [
+                  {
+                    "$ifNull": [
+                      "$prv_candidates",
+                      []
+                    ]
+                  },
+                  [
+                    "$candidate"
+                  ]
+                ]
+              },
+              "cond": {
+                "$and": [
+                  {
+                    "$eq": [
+                      "$$this.isdiffpos",
+                      true
+                    ]
+                  },
+                  {
+                    "$isNumber": "$$this.magpsf"
+                  },
+                  {
+                    "$gt": [
+                      "$$this.magpsf",
+                      0
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "in": {
+            "jd": {
+              "$toDouble": "$$this.jd"
+            },
+            "band": "$$this.band",
+            "mag": {
+              "$toDouble": "$$this.magpsf"
+            }
+          }
+        }
+      },
+      "annotations": {
+        "nuclear_sep_arcsec": {
+          "$round": [
+            "$nuclear_sep_arcsec",
+            3
+          ]
+        },
+        "reliability": {
+          "$round": [
+            "$candidate.reliability",
+            3
+          ]
+        },
+        "extendedness": {
+          "$round": [
+            "$candidate.extendedness",
+            3
+          ]
+        },
+        "ndethist": "$candidate.ndethist",
+        "age_days": {
+          "$round": [
+            {
+              "$subtract": [
+                "$candidate.jd",
+                "$jd_min_prv"
+              ]
+            },
+            2
+          ]
+        }
+      }
+    }
+  }
+]

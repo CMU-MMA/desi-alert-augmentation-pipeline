@@ -55,10 +55,51 @@ class RunConfig(_Section):
 
 
 class BoomConfig(_Section):
-    """The ``[query.boom]`` section: which survey to query, and how much."""
+    """The ``[query.boom]`` section: which surveys to query, how, and how much.
 
-    survey: str
+    One survey is ``survey = "LSST"``; several are ``surveys = ["ZTF", "LSST",
+    "DECAM"]``, and when both are written ``surveys`` wins. That precedence is
+    what lets an overlay widen a run to more surveys without having to unset
+    the base config's ``survey``, which TOML cannot do.
+    """
+
+    survey: str | None = None
+    surveys: list[str] = []
     limit: int | None = Field(default=None, ge=1)
+    # Per-survey aggregation pipeline files, keyed by survey name. A survey with
+    # no entry runs the packaged default (desi_aap/default_pipeline.json).
+    # Relative paths follow the working directory, like output_dir.
+    pipelines: dict[str, Path] = {}
+    # Per-survey programids BOOM may read alerts from, keyed by survey name.
+    # BOOM requires a non-empty list for ZTF and accepts none for the others.
+    permissions: dict[str, list[int]] = {}
+    # Per-survey column renames applied to what BOOM returns, before anything
+    # downstream reads it, as {survey: {returned name: pipeline name}}. DECam
+    # alerts carry no PSF magnitude, for instance, so a DECam run renames
+    # "candidate.magap" to "candidate.magpsf" for the distance stage to read.
+    renames: dict[str, dict[str, str]] = {}
+
+    @model_validator(mode="after")
+    def _check_surveys(self) -> "BoomConfig":
+        """Require at least one survey, and per-survey tables to name only queried ones."""
+        if not self.survey_list:
+            raise ValueError("name the survey(s) to query: 'survey' or 'surveys'.")
+        for table in ("pipelines", "permissions", "renames"):
+            stray = sorted(set(getattr(self, table)) - set(self.survey_list))
+            if stray:
+                raise ValueError(
+                    f"'{table}' has entries for {', '.join(stray)}, which this run does not query "
+                    f"(surveys: {', '.join(self.survey_list)}). A typo here would silently fall "
+                    "back to the default, so it is an error."
+                )
+        return self
+
+    @property
+    def survey_list(self) -> list[str]:
+        """The surveys this run queries, in order: ``surveys`` if given, else ``[survey]``."""
+        if self.surveys:
+            return list(self.surveys)
+        return [self.survey] if self.survey else []
 
 
 class WindowConfig(_Section):
@@ -79,6 +120,36 @@ class WindowConfig(_Section):
         return self
 
 
+class RedshiftFieldsConfig(_Section):
+    """A ``[crossmatch.catalogs.<name>.redshift]`` table: where a catalog keeps its redshifts.
+
+    The defaults are the DESI redshift catalog's own names, so a DESI release
+    needs no table at all. A catalog laid out differently -- the DR11 photo-z
+    catalog, say -- names its columns here instead.
+    """
+
+    # The redshift itself.
+    column: str = "Z"
+    # Its 1-sigma uncertainty. Optional: a catalog without one still places
+    # alerts, it just reports no error to Fritz. None by default because the
+    # DR1 and DR2 catalogs as imported here carry no ZERR column.
+    error_column: str | None = None
+    # A column, and the value it must equal, for the redshift to be trusted.
+    # DESI's ZWARN is a bitmask whose one good value is 0.
+    ok_column: str = "ZWARN"
+    ok_value: int | bool | str = 0
+    # Whether these are spectroscopic or photometric redshifts. Either a fixed
+    # `kind` for the whole catalog, or a `kind_column` holding "spec" or
+    # "photo" per row, for a catalog that carries both (the photo-z catalog
+    # import writes the better of the two per galaxy; see
+    # scripts/import_dr11_photoz.py).
+    kind: Literal["spec", "photo"] = "spec"
+    kind_column: str | None = None
+    # The DESI spectral class column, when the catalog has one. Read by filters
+    # that veto QSO hosts; a catalog without it simply cannot veto.
+    spectype_column: str | None = "SPECTYPE"
+
+
 class CrossmatchCatalogConfig(_Section):
     """One ``[crossmatch.catalogs.<name>]`` table: a catalog to match against."""
 
@@ -86,6 +157,7 @@ class CrossmatchCatalogConfig(_Section):
     columns: list[str] | Literal["all"] | None = None
     radius_arcsec: float = Field(gt=0)
     n_neighbors: int = Field(ge=1)
+    redshift: RedshiftFieldsConfig = RedshiftFieldsConfig()
 
 
 class DistanceConfig(_Section):
@@ -95,6 +167,12 @@ class DistanceConfig(_Section):
     # luminosity distance: a z of 0 puts the alert at the origin, and a small negative one
     # makes the coordinate conversion raise.
     min_redshift: float = Field(default=0.0002, gt=0)
+    # How much farther from the alert a spectroscopic host may sit than the nearest host
+    # of any kind and still be chosen over it. The same galaxy appears in a spectroscopic
+    # and a photometric catalog at positions that differ by astrometry alone, and the
+    # spectrum is the better redshift. Only matters when a photometric catalog is
+    # configured; with spectroscopic catalogs alone the nearest host always wins.
+    spec_preference_arcsec: float = Field(default=0.5, ge=0)
 
 
 class _FilterSection(_Section):
@@ -152,6 +230,81 @@ class LocalizeConfig(_FilterSection):
                 + (f"; got {', '.join(unknown)}" if unknown else "")
             )
         return self
+
+
+class Scotty750Config(_FilterSection):
+    """The ``[scotty750]`` section: the SCOTTY750 nuclear-TDE candidate screen.
+
+    SCOTTY750 is the Gemini program building a spectroscopically complete sample
+    of TDEs within 750 Mpc. Nuclear-ness, bogus/star/asteroid rejection and the
+    catalogue AGN vetoes happen server-side in the per-survey BOOM pipelines (see
+    ``pipelines/scotty750/``); this section is everything that needs the host
+    redshift or the light curve. See :mod:`desi_aap.stages.scotty750`.
+
+    Unlike the other code filters this one is off unless its section is present,
+    since it only makes sense on alerts its own BOOM pipelines selected.
+    """
+
+    # Luminosity-distance limit, and the cosmology it is computed under (a key
+    # of desi_aap.cosmology.COSMOLOGIES).
+    max_dist_mpc: float = Field(default=750.0, gt=0)
+    cosmology: str = "SHOES"
+    # How far the chosen host may sit from the alert. The redshift is only the
+    # transient's if the host is the galaxy it is nuclear to; a 5" crossmatch
+    # can otherwise hand a nuclear alert its neighbour's redshift.
+    max_host_sep_arcsec: float = Field(default=1.0, gt=0)
+    # TDEs are blue: keep g - r below this, from the most recent g and r
+    # detections taken within color_max_dt_days of each other.
+    max_g_minus_r: float = 0.0
+    color_max_dt_days: float = Field(default=1.0, gt=0)
+    # The same window per survey, overriding color_max_dt_days for the surveys
+    # named. ZTF observes g and r on the same night; LSST's cadence rarely
+    # does, so its pairs have to be allowed days apart. A TDE's color changes
+    # slowly enough that a week-apart pair still says whether it is blue.
+    color_max_dt_days_by_survey: dict[str, Annotated[float, Field(gt=0)]] = {}
+    # Whether an alert with no measurable g - r yet fails. True keeps the screen
+    # honest; the object is re-examined on its next alert, by which time it
+    # usually has both bands.
+    require_color: bool = True
+    # Drop alerts whose host DESI spectrum is classified QSO.
+    veto_qso_hosts: bool = True
+    # Archival-variability veto: drop an object whose light curve has a quiet
+    # gap of at least this many days between detection episodes, i.e. an
+    # earlier flare. BOOM groups detections into episodes split by more than 30
+    # days, which flags 10% of one-off transients; a longer gap here keeps
+    # recall. Omit to switch the veto off.
+    max_quiet_gap_days: float | None = Field(default=90.0, gt=0)
+
+
+class FritzConfig(_Section):
+    """The ``[fritz]`` section: save filter candidates to Fritz groups.
+
+    Optional, like ``[slack]``: without it the fritz_save stage skips itself.
+    See :mod:`desi_aap.stages.fritz_save`.
+    """
+
+    base_url: str = "https://fritz.science"
+    # Name of the environment variable holding the API token. The token itself
+    # never goes in a config file.
+    token_env: str = "FRITZ_TOKEN"
+    # Groups every candidate is saved to.
+    group_ids: list[int] = Field(min_length=1)
+    # Fritz's id for the BOOM broker, through which a save pulls the object's
+    # photometry and cutouts (GET /api/brokers lists them).
+    broker_id: int = 1
+    # Which filters' candidates are saved. Saving is a deliberate act, so no
+    # filter is saved unless named.
+    filters: list[str] = Field(min_length=1)
+    # Origin of the annotation this pipeline writes and keeps current on each
+    # source. Fritz allows one annotation per (source, origin).
+    annotation_origin: str = Field(default="DESI_AAP", pattern=r"^\w+$")
+    # Whether to fill in a source's redshift when it has none (or when the one
+    # it has is a photo-z this pipeline wrote and a spectrum is now available).
+    set_redshift: bool = True
+    # Smallest gap between two requests, so a large batch stays under Fritz's
+    # rate limit (5 requests/s by SkyPortal's default).
+    min_request_interval_s: float = Field(default=0.25, ge=0)
+    timeout_s: float = Field(default=120.0, gt=0)
 
 
 class DaskConfig(_Section):
@@ -299,6 +452,10 @@ class PipelineConfig(_Section):
     # credentials, and every stage still runs without them. The slack_publish
     # stage skips itself, with a log line, when this section is absent.
     slack: SlackConfig | None = None
+    # Optional: present only in a config that runs the SCOTTY750 screen.
+    scotty750: Scotty750Config | None = None
+    # Optional: without it nothing is saved to Fritz.
+    fritz: FritzConfig | None = None
 
     def dask_for(self, stage: str) -> dict[str, Any]:
         """Client arguments for one stage: the global ``[dask]``, then its own ``[<stage>.dask]``."""

@@ -1,0 +1,1039 @@
+[
+  {
+    "$match": {
+      "candidate.snr": {
+        "$gte": 5
+      },
+      "candidate.reliability": {
+        "$gt": 0.8
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "n_det_5sigma": {
+        "$size": {
+          "$filter": {
+            "input": {
+              "$ifNull": [
+                "$prv_candidates",
+                []
+              ]
+            },
+            "cond": {
+              "$gte": [
+                "$$this.snr",
+                5
+              ]
+            }
+          }
+        }
+      },
+      "jd_min_prv": {
+        "$min": "$prv_candidates.jd"
+      }
+    }
+  },
+  {
+    "$match": {
+      "n_det_5sigma": {
+        "$gte": 4
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "nuclear_sep_arcsec": {
+        "$min": {
+          "$map": {
+            "input": {
+              "$filter": {
+                "input": {
+                  "$ifNull": [
+                    "$cross_matches.LSPSC",
+                    []
+                  ]
+                },
+                "cond": {
+                  "$not": [
+                    {
+                      "$gte": [
+                        "$$this.score",
+                        0.7
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            "in": "$$this.distance_arcsec"
+          }
+        }
+      }
+    }
+  },
+  {
+    "$match": {
+      "nuclear_sep_arcsec": {
+        "$gte": 0,
+        "$lte": 0.3
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "lspsc_star": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.LSPSC",
+                []
+              ]
+            },
+            "in": {
+              "$and": [
+                {
+                  "$gte": [
+                    "$$this.score",
+                    0.7
+                  ]
+                },
+                {
+                  "$or": [
+                    {
+                      "$lte": [
+                        "$$this.distance_arcsec",
+                        1.5
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "$lte": [
+                            "$$this.distance_arcsec",
+                            4
+                          ]
+                        },
+                        {
+                          "$lte": [
+                            "$$this.mag_white",
+                            18
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "$lte": [
+                            "$$this.distance_arcsec",
+                            6
+                          ]
+                        },
+                        {
+                          "$lte": [
+                            "$$this.mag_white",
+                            17.5
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "$lte": [
+                            "$$this.distance_arcsec",
+                            10
+                          ]
+                        },
+                        {
+                          "$lte": [
+                            "$$this.mag_white",
+                            16
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "$lte": [
+                            "$$this.distance_arcsec",
+                            30
+                          ]
+                        },
+                        {
+                          "$lte": [
+                            "$$this.mag_white",
+                            15
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "Is_Quasar": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.milliquas_v8",
+                []
+              ]
+            },
+            "in": {
+              "$in": [
+                "$$this.objtype",
+                [
+                  "Q",
+                  "Q2",
+                  "Q2X",
+                  "QR",
+                  "QR2",
+                  "QR2X",
+                  "QRX",
+                  "QX"
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "WiseW1W2_gt1": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": {
+              "$ifNull": [
+                "$cross_matches.CatWISE2020",
+                []
+              ]
+            },
+            "in": {
+              "$gt": [
+                {
+                  "$subtract": [
+                    "$$this.w1mpro",
+                    "$$this.w2mpro"
+                  ]
+                },
+                0.5
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "$match": {
+      "lspsc_star": false,
+      "Is_Quasar": false
+    }
+  },
+  {
+    "$addFields": {
+      "cos_dec": {
+        "$cos": {
+          "$degreesToRadians": "$candidate.dec"
+        }
+      },
+      "years_since_gaia_epoch": {
+        "$divide": [
+          {
+            "$subtract": [
+              "$candidate.jd",
+              2457389
+            ]
+          },
+          365.25
+        ]
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "gaia_now": {
+        "$map": {
+          "input": {
+            "$ifNull": [
+              "$cross_matches.Gaia_DR3",
+              []
+            ]
+          },
+          "as": "g",
+          "in": {
+            "$let": {
+              "vars": {
+                "dra": {
+                  "$subtract": [
+                    "$$g.ra",
+                    "$candidate.ra"
+                  ]
+                },
+                "move_ra": {
+                  "$divide": [
+                    {
+                      "$multiply": [
+                        {
+                          "$ifNull": [
+                            "$$g.pmra",
+                            0
+                          ]
+                        },
+                        "$years_since_gaia_epoch"
+                      ]
+                    },
+                    1000
+                  ]
+                },
+                "move_dec": {
+                  "$divide": [
+                    {
+                      "$multiply": [
+                        {
+                          "$ifNull": [
+                            "$$g.pmdec",
+                            0
+                          ]
+                        },
+                        "$years_since_gaia_epoch"
+                      ]
+                    },
+                    1000
+                  ]
+                }
+              },
+              "in": {
+                "G": "$$g.phot_g_mean_mag",
+                "pm": "$$g.pm",
+                "sep": {
+                  "$sqrt": {
+                    "$add": [
+                      {
+                        "$pow": [
+                          {
+                            "$add": [
+                              {
+                                "$multiply": [
+                                  {
+                                    "$switch": {
+                                      "branches": [
+                                        {
+                                          "case": {
+                                            "$gt": [
+                                              "$$dra",
+                                              180
+                                            ]
+                                          },
+                                          "then": {
+                                            "$subtract": [
+                                              "$$dra",
+                                              360
+                                            ]
+                                          }
+                                        },
+                                        {
+                                          "case": {
+                                            "$lt": [
+                                              "$$dra",
+                                              -180
+                                            ]
+                                          },
+                                          "then": {
+                                            "$add": [
+                                              "$$dra",
+                                              360
+                                            ]
+                                          }
+                                        }
+                                      ],
+                                      "default": "$$dra"
+                                    }
+                                  },
+                                  "$cos_dec",
+                                  3600
+                                ]
+                              },
+                              "$$move_ra"
+                            ]
+                          },
+                          2
+                        ]
+                      },
+                      {
+                        "$pow": [
+                          {
+                            "$add": [
+                              {
+                                "$multiply": [
+                                  {
+                                    "$subtract": [
+                                      "$$g.dec",
+                                      "$candidate.dec"
+                                    ]
+                                  },
+                                  3600
+                                ]
+                              },
+                              "$$move_dec"
+                            ]
+                          },
+                          2
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "stellar": {
+                  "$or": [
+                    {
+                      "$gte": [
+                        {
+                          "$divide": [
+                            "$$g.parallax",
+                            "$$g.parallax_error"
+                          ]
+                        },
+                        3
+                      ]
+                    },
+                    {
+                      "$gte": [
+                        {
+                          "$divide": [
+                            "$$g.pm",
+                            {
+                              "$max": [
+                                "$$g.pmra_error",
+                                "$$g.pmdec_error"
+                              ]
+                            }
+                          ]
+                        },
+                        3
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "gaia_star": {
+        "$anyElementTrue": {
+          "$map": {
+            "input": "$gaia_now",
+            "in": {
+              "$and": [
+                {
+                  "$lte": [
+                    "$$this.sep",
+                    2
+                  ]
+                },
+                "$$this.stellar"
+              ]
+            }
+          }
+        }
+      },
+      "gaia_nearest": {
+        "$first": {
+          "$sortArray": {
+            "input": "$gaia_now",
+            "sortBy": {
+              "sep": 1
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "$match": {
+      "gaia_star": false
+    }
+  },
+  {
+    "$addFields": {
+      "jd_min_prv": {
+        "$min": "$prv_candidates.jd"
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "prv_cands_90_bin_hist_arr": {
+        "$filter": {
+          "input": {
+            "$ifNull": [
+              "$prv_candidates",
+              []
+            ]
+          },
+          "cond": {
+            "$and": [
+              {
+                "$gt": [
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      "$jd_min_prv"
+                    ]
+                  },
+                  150
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.magap",
+                  0
+                ]
+              },
+              {
+                "$lt": [
+                  "$$this.magap",
+                  24
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "$addFields": {
+      "dets_jd_btw_90_180": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      90
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      180
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_180_270": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      180
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      270
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_270_360": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      270
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      360
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_360_450": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      360
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      450
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_450_540": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      450
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      540
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_540_630": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      540
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      630
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_630_720": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      630
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      720
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_720_810": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      720
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      810
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "dets_jd_btw_810_900": {
+        "$filter": {
+          "input": "$prv_cands_90_bin_hist_arr",
+          "cond": {
+            "$and": [
+              {
+                "$lt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      810
+                    ]
+                  }
+                ]
+              },
+              {
+                "$gt": [
+                  "$$this.jd",
+                  {
+                    "$subtract": [
+                      "$candidate.jd",
+                      900
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "$match": {
+      "$nor": [
+        {
+          "$and": [
+            {
+              "WiseW1W2_gt1": {
+                "$eq": true
+              }
+            },
+            {
+              "$and": [
+                {
+                  "prv_cands_90_bin_hist_arr.50": {
+                    "$exists": true
+                  }
+                },
+                {
+                  "$or": [
+                    {
+                      "$and": [
+                        {
+                          "dets_jd_btw_90_180.10": {
+                            "$exists": true
+                          }
+                        },
+                        {
+                          "dets_jd_btw_180_270.10": {
+                            "$exists": true
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "dets_jd_btw_180_270.10": {
+                            "$exists": true
+                          }
+                        },
+                        {
+                          "dets_jd_btw_270_360.10": {
+                            "$exists": true
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "dets_jd_btw_270_360.10": {
+                            "$exists": true
+                          }
+                        },
+                        {
+                          "dets_jd_btw_360_450.10": {
+                            "$exists": true
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "dets_jd_btw_360_450.10": {
+                            "$exists": true
+                          }
+                        },
+                        {
+                          "dets_jd_btw_450_540.10": {
+                            "$exists": true
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "dets_jd_btw_450_540.10": {
+                            "$exists": true
+                          }
+                        },
+                        {
+                          "dets_jd_btw_540_630.10": {
+                            "$exists": true
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "dets_jd_btw_540_630.10": {
+                            "$exists": true
+                          }
+                        },
+                        {
+                          "dets_jd_btw_630_720.10": {
+                            "$exists": true
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "dets_jd_btw_630_720.10": {
+                            "$exists": true
+                          }
+                        },
+                        {
+                          "dets_jd_btw_720_810.10": {
+                            "$exists": true
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "$and": [
+                        {
+                          "dets_jd_btw_720_810.10": {
+                            "$exists": true
+                          }
+                        },
+                        {
+                          "dets_jd_btw_810_900.10": {
+                            "$exists": true
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "$project": {
+      "objectId": 1,
+      "candidate.ra": 1,
+      "candidate.dec": 1,
+      "candidate.jd": 1,
+      "candidate.band": 1,
+      "candidate.magap": 1,
+      "nuclear_sep_arcsec": 1,
+      "properties.episode_history.n_episodes": 1,
+      "properties.episode_history.longest_quiet_days": 1,
+      "lc": {
+        "$map": {
+          "input": {
+            "$filter": {
+              "input": {
+                "$concatArrays": [
+                  {
+                    "$ifNull": [
+                      "$prv_candidates",
+                      []
+                    ]
+                  },
+                  [
+                    "$candidate"
+                  ]
+                ]
+              },
+              "cond": {
+                "$and": [
+                  {
+                    "$isNumber": "$$this.magap"
+                  },
+                  {
+                    "$gt": [
+                      "$$this.magap",
+                      0
+                    ]
+                  },
+                  {
+                    "$gte": [
+                      "$$this.snr",
+                      5
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "in": {
+            "jd": {
+              "$toDouble": "$$this.jd"
+            },
+            "band": "$$this.band",
+            "mag": {
+              "$toDouble": "$$this.magap"
+            }
+          }
+        }
+      },
+      "annotations": {
+        "nuclear_sep_arcsec": {
+          "$round": [
+            "$nuclear_sep_arcsec",
+            3
+          ]
+        },
+        "snr": {
+          "$round": [
+            "$candidate.snr",
+            1
+          ]
+        },
+        "reliability": {
+          "$round": [
+            "$candidate.reliability",
+            3
+          ]
+        },
+        "n_det_5sigma": "$n_det_5sigma",
+        "age_days": {
+          "$round": [
+            {
+              "$subtract": [
+                "$candidate.jd",
+                "$jd_min_prv"
+              ]
+            },
+            2
+          ]
+        },
+        "gaia_sep_now_arcsec": {
+          "$round": [
+            "$gaia_nearest.sep",
+            2
+          ]
+        }
+      }
+    }
+  }
+]

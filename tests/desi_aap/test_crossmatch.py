@@ -3,7 +3,7 @@
 import nested_pandas as npd
 import pytest
 
-from desi_aap import pipeline
+from desi_aap import boom, pipeline
 from desi_aap.stages.base import StageResult
 from desi_aap.stages.crossmatch import (
     STAGE,
@@ -48,9 +48,12 @@ def test_run_crossmatch(pipeline_config, alert_inputs, stub_boom, stub_gracedb):
     assert all(matches["desi_dr1"].array.list_lengths == 1)
     assert all(matches["desi_dr1._dist_arcsec"] <= 5.0)
 
-    # The results should be the same whether we call the stage directly or run the whole pipeline
+    # The results should be the same whether we call the stage directly or run the whole
+    # pipeline, but for the survey column the query stage tags each alert with.
     results = pipeline.run_pipeline(pipeline_config, stamp="20260807T120000Z")
-    assert results["crossmatch"].frame.equals(matches)
+    via_pipeline = results["crossmatch"].frame
+    assert (via_pipeline[boom.ALERT_SURVEY_COLUMN] == "LSST").all()
+    assert via_pipeline.drop(columns=[boom.ALERT_SURVEY_COLUMN]).equals(matches)
 
 
 def test_catalog_specs_come_from_the_config(pipeline_config):

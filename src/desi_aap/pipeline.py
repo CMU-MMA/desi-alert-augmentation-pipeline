@@ -9,6 +9,8 @@ out into *filters*, each asking a different question of those same alerts::
                                      +-> (luminous) ---+-> slack_publish
                                      |                 |
                                      +-> (nearby) -----+
+                                     |                 |
+                                     +-> scotty750 ----+-> fritz_save
 
 So a stage that produces nothing *skips* what depends on it rather than ending
 the run. Most hours have no GW superevent within ``window_days``, and a run
@@ -29,7 +31,7 @@ from functools import partial
 from types import ModuleType
 
 from desi_aap.config import PipelineConfig
-from desi_aap.stages import crossmatch, distance, query, slack_publish
+from desi_aap.stages import crossmatch, distance, fritz_save, query, slack_publish
 from desi_aap.stages.base import StageInputs, StageResult
 from desi_aap.stages.filters import filter_descriptors
 from desi_aap.utils import run_stamp
@@ -108,7 +110,8 @@ def stages_for(cfg: PipelineConfig) -> tuple[StageSpec, ...]:
     tuple of StageSpec
         The data stages, then every filter (code and JSON alike, disabled ones
         included so their skip is recorded), then ``slack_publish``, which
-        requires them all.
+        requires them all, then ``fritz_save``, which requires the filters
+        ``[fritz] filters`` names (none, and so skipped, without ``[fritz]``).
 
     Raises
     ------
@@ -127,7 +130,14 @@ def stages_for(cfg: PipelineConfig) -> tuple[StageSpec, ...]:
         partial(slack_publish.run_slack_publish, descriptors=filters),
         requires=tuple(d.stage for d in filters),
     )
-    return (*DATA_STAGES, *filter_specs, announce)
+    # Saving to Fritz depends only on the filters [fritz] names, checked here so
+    # a misnamed one fails the run before any stage has spent time on it.
+    save = StageSpec(
+        fritz_save.STAGE,
+        partial(fritz_save.run_fritz_save, descriptors=filters),
+        requires=fritz_save.resolve_filters(cfg, filters),
+    )
+    return (*DATA_STAGES, *filter_specs, announce, save)
 
 
 def stage_order(cfg: PipelineConfig) -> list[str]:
@@ -222,7 +232,9 @@ def run_pipeline(
     # The filters are the stages between the shared data stages and the
     # announcement -- read off the list just built, not the disk again.
     data = {spec.name for spec in DATA_STAGES}
-    filters = [name for name in order if name not in data and name != slack_publish.STAGE]
+    filters = [
+        name for name in order if name not in data and name not in (slack_publish.STAGE, fritz_save.STAGE)
+    ]
 
     logger.info("----- DESI Alert Augmentation Pipeline -----")
     logger.info("desi_aap version : %s", __version__)

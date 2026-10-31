@@ -29,7 +29,7 @@ and its distances added as flat columns::
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +39,7 @@ import pandas as pd
 from astropy import units as u
 
 from desi_aap.boom import ALERT_MAG_COLUMN
-from desi_aap.config import PipelineConfig
+from desi_aap.config import PipelineConfig, RedshiftFieldsConfig
 from desi_aap.cosmology import COSMOLOGIES
 from desi_aap.stages.base import StageInputs, StageResult, input_result, write_frame
 from desi_aap.stages.crossmatch import STAGE as CROSSMATCH_STAGE
@@ -59,7 +59,14 @@ OUTPUT_PREFIX = "distances"
 # Flat columns this stage adds describing the chosen host. The distance columns
 # are named per cosmology and built by dist_column below, since which of them
 # exist follows COSMOLOGIES rather than being fixed here.
-HOST_COLUMNS = ("host_catalog", "host_redshift", "host_sep_arcsec")
+HOST_COLUMNS = (
+    "host_catalog",
+    "host_redshift",
+    "host_redshift_err",
+    "host_redshift_kind",
+    "host_sep_arcsec",
+    "host_spectype",
+)
 
 
 def dist_column(label: str) -> str:
@@ -116,9 +123,9 @@ def _host_fields(matches: npd.NestedFrame, name: str, fields: Sequence[str]) -> 
     name : str
         Nested column to read hosts from, i.e. the configured catalog name.
     fields : sequence of str
-        Fields to read from the nested column: the redshift, the flag saying
-        whether its fit is trustworthy, and the angular separation between alert
-        and host.
+        Fields the nested column must carry: the redshift, the flag saying
+        whether it is trustworthy, and the angular separation between alert and
+        host, plus any per-row kind column the catalog is configured with.
 
     Returns
     -------
@@ -137,10 +144,17 @@ def _host_fields(matches: npd.NestedFrame, name: str, fields: Sequence[str]) -> 
         raise ValueError(
             f"Nested column {name!r} has no {', '.join(repr(f) for f in missing)} field, so "
             f"stage {STAGE!r} cannot read a host redshift from it. Every catalog in "
-            "[crossmatch.catalogs.*] is read for one, so a catalog that carries no redshift "
-            "cannot be cross-matched alongside those that do."
+            "[crossmatch.catalogs.*] is read for one: name its columns in that catalog's "
+            "[crossmatch.catalogs.<name>.redshift] table if they differ from DESI's."
         )
     return flat
+
+
+def _optional(flat: pd.DataFrame, column: str | None) -> pd.Series:
+    """A column of ``flat`` if configured and present, else all-missing."""
+    if column is not None and column in flat.columns:
+        return flat[column]
+    return pd.Series(pd.NA, index=flat.index, dtype="object")
 
 
 def nearest_hosts(
@@ -152,14 +166,23 @@ def nearest_hosts(
     warning_field: str = "ZWARN",
     separation_field: str = "_dist_arcsec",
     ok_warning: int = 0,
+    fields: Mapping[str, RedshiftFieldsConfig] | None = None,
+    spec_preference_arcsec: float = 0.0,
 ) -> pd.DataFrame:
-    """Pick the host each alert takes its redshift from: the nearest across all catalogs.
+    """Pick the host each alert takes its redshift from.
 
     An alert can carry several host candidates (one per neighbour, per catalog)
     and a distance needs exactly one. The candidates from every catalog are
     pooled and the closest one on the sky wins, so which catalog an alert's
     redshift comes from is decided by the association rather than by the order in
     which the catalogs are configured.
+
+    The one exception is a spectroscopic redshift against a photometric one. The
+    same galaxy sits in a spectroscopic and a photometric catalog at positions
+    that differ by astrometry alone, and the spectrum is the better redshift, so
+    a spectroscopic host within ``spec_preference_arcsec`` of the nearest host's
+    separation wins over it. With spectroscopic catalogs alone this changes
+    nothing.
 
     Parameters
     ----------
@@ -170,61 +193,84 @@ def nearest_hosts(
         [crossmatch.catalogs.*] -- each is a nested column on ``matches``. A
         catalog with no column on the frame is skipped, since a crossmatch that
         produced no column for it produced no hosts either. A catalog whose
-        column is present but lacks one of the three fields below raises
-        instead: that is a schema mismatch rather than an absence.
+        column is present but lacks a required field raises instead: that is a
+        schema mismatch rather than an absence.
     min_redshift : float
         Smallest redshift treated as a real measurement, inclusive. Hosts below
         it are discarded rather than clamped, for the reasons set out in
         tns_catalog.clean_tns_catalog: a non-positive redshift yields no usable
         luminosity distance, and small negative ones make ``SkyCoord`` raise
         further down.
-    redshift_field, warning_field, separation_field : str
-        Fields read from each nested column: the redshift, the flag saying
-        whether its fit is trustworthy, and the angular separation between alert
-        and host. The first two are the DESI redshift catalog's own names; the
-        third is what LSDB's crossmatch_nested records for every match it makes.
-    ok_warning : int
-        The one warning_field value meaning the redshift fit raised nothing.
-        Every other value is a bitmask of the problems the fit hit.
+    redshift_field, warning_field, ok_warning : str, str, int
+        Where a catalog with no entry in ``fields`` keeps its redshift, and the
+        flag column and value meaning that redshift is trustworthy. The DESI
+        redshift catalog's own names.
+    separation_field : str
+        The angular separation between alert and host, which is what LSDB's
+        crossmatch_nested records for every match it makes.
+    fields : mapping of str to RedshiftFieldsConfig, optional
+        Per-catalog column names, overriding the three above and adding the
+        redshift error, its kind (spec or photo), and the spectral class.
+    spec_preference_arcsec : float
+        How much farther than the nearest host a spectroscopic one may sit and
+        still win. See above.
 
     Returns
     -------
     pandas.DataFrame
         One row per alert that has a usable host, indexed by that alert's row in
-        ``matches``, with columns:
+        ``matches``, with the :data:`HOST_COLUMNS`:
 
         host_catalog
             The nested column the host came from.
         host_redshift
             Its redshift.
+        host_redshift_err
+            Its uncertainty, missing where the catalog has none.
+        host_redshift_kind
+            "spec" or "photo".
         host_sep_arcsec
             Its separation from the alert, which is what it won on.
+        host_spectype
+            Its spectral class (GALAXY, QSO, STAR), missing where the catalog
+            has none.
 
-        An alert appears here only if at least one of its hosts passed both
+        An alert appears here only if at least one of its hosts passed the
         cuts. One whose hosts all failed is left out entirely rather than kept
         with a missing redshift, which is what lets the caller read a missing
         row as "this alert has no usable host". If no alert qualifies the result
-        is empty but still carries the three columns above.
+        is empty but still carries the columns above.
 
     Raises
     ------
     ValueError
-        If a named nested column is missing one of the three fields.
+        If a named nested column is missing a required field.
     """
+    fields = fields or {}
     candidates = []
     for name in catalog_names:
         if name not in matches.columns or matches.empty:
             continue
-        flat = _host_fields(matches, name, (redshift_field, warning_field, separation_field))
+        spec = fields.get(name) or RedshiftFieldsConfig(
+            column=redshift_field, ok_column=warning_field, ok_value=ok_warning
+        )
+        required = [spec.column, spec.ok_column, separation_field]
+        if spec.kind_column is not None:
+            required.append(spec.kind_column)
+        flat = _host_fields(matches, name, required)
         if flat.empty:  # No candidates from this catalog, so it cannot contribute to the nearest host.
             continue
+        kind = flat[spec.kind_column].astype("object") if spec.kind_column else spec.kind
         candidates.append(
             pd.DataFrame(
                 {
                     "host_catalog": name,
-                    "host_redshift": pd.to_numeric(flat[redshift_field], errors="coerce"),
+                    "host_redshift": pd.to_numeric(flat[spec.column], errors="coerce"),
+                    "host_redshift_err": pd.to_numeric(_optional(flat, spec.error_column), errors="coerce"),
+                    "host_redshift_kind": kind,
                     "host_sep_arcsec": pd.to_numeric(flat[separation_field], errors="coerce"),
-                    "host_zwarn": pd.to_numeric(flat[warning_field], errors="coerce"),
+                    "host_spectype": _optional(flat, spec.spectype_column).astype("object"),
+                    "_ok": flat[spec.ok_column].eq(spec.ok_value),
                 },
                 index=flat.index,
             )
@@ -235,16 +281,28 @@ def nearest_hosts(
 
     hosts = pd.concat(candidates)
     # NaN fails all three comparisons, so an unparseable redshift, an absent
-    # ZWARN and a missing separation all leave by this line.
+    # flag and a missing separation all leave by this line.
     hosts = hosts[
-        hosts["host_zwarn"].eq(ok_warning)
+        hosts["_ok"].fillna(False).astype(bool)
         & (hosts["host_redshift"] >= min_redshift)
         & hosts["host_sep_arcsec"].notna()
+        & hosts["host_redshift_kind"].isin(["spec", "photo"])
     ]
+    if hosts.empty:
+        return pd.DataFrame(columns=list(HOST_COLUMNS))
+
+    # Rank on an effective separation: a spectroscopic host is treated as up to
+    # spec_preference_arcsec closer than it is, so it beats a photometric host of
+    # the same galaxy, while any host still beats a farther one of its own kind.
     # Sorted on the catalog name as well so that two hosts at the same separation
     # -- the same object present in two releases -- resolve the same way on every
     # run rather than on whichever release happened to be concatenated first.
-    hosts = hosts.sort_values(["host_sep_arcsec", "host_catalog"], kind="stable")
+    is_spec = hosts["host_redshift_kind"].eq("spec")
+    hosts = hosts.assign(
+        _rank=hosts["host_sep_arcsec"] - is_spec * spec_preference_arcsec,
+        _spec_first=~is_spec,
+    )
+    hosts = hosts.sort_values(["_rank", "_spec_first", "host_sep_arcsec", "host_catalog"], kind="stable")
     hosts = hosts[~hosts.index.duplicated(keep="first")]
     return hosts[list(HOST_COLUMNS)].sort_index()
 
@@ -371,7 +429,13 @@ def run_distance(
         logger.info("No matched alerts to place at a distance; writing nothing.")
         return StageResult(stage=STAGE, frame=None, stamp=stamp, summary={"n_alerts": 0})
 
-    hosts = nearest_hosts(matches, catalog_names, min_redshift=settings.min_redshift)
+    hosts = nearest_hosts(
+        matches,
+        catalog_names,
+        min_redshift=settings.min_redshift,
+        fields={name: entry.redshift for name, entry in cfg.crossmatch.catalogs.items()},
+        spec_preference_arcsec=settings.spec_preference_arcsec,
+    )
     frame = attach_distances(matches, hosts)
 
     summary: dict[str, Any] = {

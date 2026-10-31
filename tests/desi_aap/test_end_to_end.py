@@ -243,9 +243,11 @@ def test_the_shipped_filters_run_as_stages_end_to_end(
     assert list(results) == [
         *[s.name for s in pipeline.DATA_STAGES],
         LOCALIZE_STAGE,
+        "scotty750",  # off without a [scotty750] section, but listed so its skip is recorded
         "luminous",
         "nearby",
         SLACK_STAGE,
+        "fritz_save",
     ]
 
     luminous = results["luminous"]

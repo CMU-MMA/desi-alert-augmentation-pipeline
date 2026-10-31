@@ -59,6 +59,11 @@ ALERT_TIME_COLUMN = "candidate.jd"
 # on, so the two are projected and carried together.
 ALERT_MAG_COLUMN = "candidate.magpsf"
 ALERT_BAND_COLUMN = "candidate.band"
+# Which survey an alert came from, as the BOOM survey name ("ZTF", "LSST",
+# "DECAM"). Not a BOOM field: the query stage adds it, since a run querying
+# several surveys returns one frame and the object ids alone do not say which
+# survey's photometry a downstream consumer (Fritz) should fetch.
+ALERT_SURVEY_COLUMN = "survey"
 
 # Every value ALERT_BAND_COLUMN can take: a lowercase single-letter string
 # rather than an integer filter id, because BOOM normalizes every survey it
@@ -96,6 +101,36 @@ def load_default_pipeline() -> list[dict[str, Any]]:
         A freshly parsed copy of the default aggregation pipeline.
     """
     return json.loads(DEFAULT_PIPELINE_PATH.read_text())
+
+
+def load_pipeline(path: "str | os.PathLike[str] | None") -> list[dict[str, Any]]:
+    """Load an aggregation pipeline from a JSON file, or the default one.
+
+    Parameters
+    ----------
+    path : path-like or None
+        A JSON file holding the pipeline as a list of stages. None loads
+        ``default_pipeline.json``.
+
+    Returns
+    -------
+    list of dict
+        The parsed pipeline.
+
+    Raises
+    ------
+    ValueError
+        If the file does not hold a JSON list.
+    """
+    if path is None:
+        return load_default_pipeline()
+    with open(path) as handle:
+        pipeline = json.load(handle)
+    if not isinstance(pipeline, list):
+        raise ValueError(
+            f"{path} must hold a JSON list of aggregation stages, not a {type(pipeline).__name__}."
+        )
+    return pipeline
 
 
 def _to_jd(value: TimeLike) -> float:

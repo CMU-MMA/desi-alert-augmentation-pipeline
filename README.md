@@ -18,7 +18,9 @@ asking a different question of those same alerts.
 ```
 query → crossmatch → distance ─┬→ localize (GW)      ──┐
                                ├→ luminous (SLSN/TDE) ─┼→ slack_publish
-                               └→ nearby (≤ 750 Mpc)  ─┘
+                               ├→ nearby (≤ 750 Mpc)  ─┤
+                               └→ scotty750 (nuclear TDEs; off without [scotty750])
+                                                        └→ fritz_save
 ```
 
 | Stage | Does | Writes |
@@ -29,7 +31,9 @@ query → crossmatch → distance ─┬→ localize (GW)      ──┐
 | `localize` | **Filter.** Scores those alerts against public LIGO/Virgo superevents (`desi_aap.stages.localize`), keeping the ones inside a 3D credible volume | `localize/coincidences_<stamp>.parquet` |
 | `luminous` | **Filter**, from `filters/luminous.json`: keeps alerts brighter than absolute magnitude −20 at their host's distance — the SLSN/TDE screen | `luminous/candidates_<stamp>.parquet` |
 | `nearby` | **Filter**, from `filters/nearby.json`: keeps alerts within 750 Mpc | `nearby/candidates_<stamp>.parquet` |
+| `scotty750` | **Filter**, on only with a `[scotty750]` section: nuclear, blue, TDE-like alerts within 750 Mpc — see [SCOTTY750](#scotty750-nuclear-tdes-within-750-mpc-saved-to-fritz) | `scotty750/candidates_<stamp>.parquet` |
 | `slack_publish` | Posts one message per filter that found something (`desi_aap.stages.slack_publish`). Skips itself unless a `[slack]` section is configured — see [Slack publishing](#slack-publishing) | nothing |
+| `fritz_save` | Saves the candidates of the filters `[fritz] filters` names to Fritz, with a redshift and an annotation (`desi_aap.stages.fritz_save`). Skips itself without a `[fritz]` section | `fritz_save/saves_<stamp>.parquet` |
 
 Every filter is a cut on distance in some form — a GW credible *volume*, an
 absolute magnitude, a luminosity-distance limit — which is why `distance` is
@@ -407,6 +411,91 @@ are treated as not run — one message, honestly labeled, rather than the same
 rows posted once per filter under cuts that never ran. To exercise a specific
 filter, start from that filter instead.
 
+## SCOTTY750: nuclear TDEs within 750 Mpc, saved to Fritz
+
+SCOTTY750 (the Spectroscopically Complete catalOg of Tidal disruption events
+ouT to 750 Mpc) classifies every TDE-like nuclear transient within 750 Mpc with
+Gemini. `scotty750.toml` is the run that finds its candidates and saves them to
+the Fritz group [SCOTTY750](https://fritz.science/group/2064):
+
+```bash
+desi-aap run -c config.toml -c scotty750.toml
+```
+
+```
+query (ZTF, LSST, DECam) → crossmatch (DESI DR1, DR2, DR11 photo-z) → distance → scotty750 → fritz_save
+```
+
+**Query.** One BOOM pipeline per survey, in `pipelines/scotty750/`, each the
+survey's bogus/star/asteroid rejection and catalogue AGN vetoes (milliquas,
+WISE W1−W2 with a long detection history) plus the **nuclear** cut: the alert
+within 0.5″ of an extended Legacy Survey DR10 source for ZTF, or 0.3″ of a
+non-stellar LSPSC source for LSST and DECam. There are no magnitude cuts — the
+program's targets peak at 20–22 mag. A final `$project` gives every survey the
+same columns, including an `lc` light curve (`jd`, `band`, `mag` of every
+positive detection). `[query.boom]` takes `surveys`, and per-survey
+`pipelines`, `permissions` (ZTF programids) and `renames` (DECam's aperture
+magnitude becomes `candidate.magpsf`); every row gets a `survey` column.
+
+**Redshifts.** DESI DR1 and DR2 spectra, and the DR11 photo-z catalog, whose
+`Z` is a DESI spectrum (Loa = DR2, Matterhorn = Y5) where it has a good one and
+the photo-z otherwise. Build that catalog once with
+`sbatch scripts/import_dr11_photoz.sbatch` (see `scripts/import_dr11_photoz.py`).
+A newer DESI release is one more `[crossmatch.catalogs.<name>]` table.
+
+**The `scotty750` filter** (`desi_aap.stages.scotty750`, settings in
+`[scotty750]`) keeps an alert when the host is within `max_dist_mpc` (750,
+SHOES), sits within `max_host_sep_arcsec` (1″) of the alert, is not a DESI QSO,
+the light curve has no earlier flare (BOOM's longest quiet gap between
+detection episodes under `max_quiet_gap_days`, 90), and the latest g − r from
+detections at most `color_max_dt_days` (1 d) apart is below `max_g_minus_r`
+(0). `color_max_dt_days_by_survey` overrides that window per survey: LSST
+rarely takes g and r on the same night, so `scotty750.toml` allows its pairs
+7 days apart. An alert with no g − r yet fails while `require_color` is on; it is
+looked at again on its next alert. The filter is off in any run without a
+`[scotty750]` section.
+
+**`fritz_save`** (`desi_aap.stages.fritz_save`, settings in `[fritz]`) saves
+every candidate of the filters `[fritz] filters` names:
+
+1. through the BOOM broker (`POST /api/brokers/1/objects/<objectId>/save`),
+   which brings the photometry and cutouts;
+2. to the groups (`POST /api/sources`) — the broker save adds only *new*
+   objects to groups, so this is what puts an object Fritz already had into
+   ours. If the broker save failed, this saves the source bare;
+3. with a redshift, if the source has none: `redshift_origin` is
+   `DESI_AAP:<catalog>:<spec|photo>`. A photo-z this pipeline set is upgraded
+   when a spectrum turns up; anyone else's redshift is never touched;
+4. with one annotation, origin `DESI_AAP`, replaced every run: host redshift,
+   kind and separation, distance, absolute magnitude, g − r, and the BOOM
+   pipeline's own `annotations.*`.
+
+A failure on one candidate is recorded and the rest still go;
+`fritz_save/saves_<stamp>.parquet` says what was done to each. The token is
+read from `$FRITZ_TOKEN` (`[fritz] token_env`), so a scheduled run must start a
+login shell. `--dry-run` makes no Fritz request at all.
+
+### Running it every hour
+
+`scripts/scotty750_hourly.sh` is one run, from the checkout, in a login shell
+(so `~/.bash_profile` supplies the BOOM and Fritz credentials). Two ways to
+repeat it:
+
+- **tmux**, on a machine that stays up: `scripts/scotty750_loop.sh` runs it at
+  five past every hour and logs each run to `output/scotty750/loop.log`.
+
+  ```bash
+  tmux new -d -s scotty750 scripts/scotty750_loop.sh
+  tmux kill-session -t scotty750   # to stop it
+  ```
+
+- **Slurm**, on a Bridges-2 compute node: `scrontab scripts/scotty750.scrontab`
+  (this replaces your scrontab; `scrontab -r` removes it).
+
+The three-hour lookback overlaps the hourly runs, since alerts can reach BOOM
+late and every Fritz step is safe to repeat. `scotty750.toml` sizes Dask for a
+small VM: two 1.5 GB workers.
+
 ## The distance stage
 
 An alert carries no redshift of its own. What it carries, after `crossmatch`,
@@ -415,8 +504,13 @@ redshifts. `desi_aap.stages.distance` picks one of them per alert and turns its
 redshift into a luminosity distance.
 
 The host is chosen by pooling the matches from every `[crossmatch.catalogs.*]`
-table and keeping the **nearest** one with `ZWARN == 0` and a redshift at or
-above `min_redshift`. Which catalog that turns out to be is decided by the
+table and keeping the **nearest** one whose redshift is trusted (`ZWARN == 0`
+for DESI) and at or above `min_redshift`. A catalog laid out differently names
+its columns in a `[crossmatch.catalogs.<name>.redshift]` table — the redshift,
+its error, the trusted-flag column and value, whether it is `spec` or `photo`
+(fixed, or per row), and the spectral class. A spectroscopic host within
+`[distance] spec_preference_arcsec` of the nearest host's separation beats a
+photometric one, since that is the same galaxy seen by two catalogs. Which catalog that turns out to be is decided by the
 association, not by config order, and is recorded per row in `host_catalog`.
 Two hosts at the same separation — the same object in two releases — resolve
 the same way on every run. Every catalog is read for a redshift, so one that
@@ -432,7 +526,8 @@ because every filter is a cut on distance in some form — a GW credible
 inside one filter would mean the others either repeated the work or disagreed
 with it.
 
-Each row gains `host_catalog`, `host_redshift`, `host_sep_arcsec`, and one
+Each row gains `host_catalog`, `host_redshift`, `host_redshift_err`,
+`host_redshift_kind`, `host_sep_arcsec`, `host_spectype`, and one
 `dist_mpc_<label>` per entry in `desi_aap.cosmology.COSMOLOGIES` — every
 cosmology rather than one chosen here, because the choice belongs to whoever is
 cutting on the number. Two columns of the same redshift are cheap; a distance

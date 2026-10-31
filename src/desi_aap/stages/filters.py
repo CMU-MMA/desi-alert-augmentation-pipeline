@@ -30,14 +30,14 @@ from dataclasses import dataclass
 from types import ModuleType
 
 from desi_aap.config import ConfigError, PipelineConfig
-from desi_aap.stages import cut_filter, localize
+from desi_aap.stages import cut_filter, localize, scotty750
 from desi_aap.stages.base import SlackDisplay, StageResult
 
 __all__ = ["FILTER_MODULES", "FilterDescriptor", "filter_descriptors"]
 
 # Every code filter, in the order their results are announced. The JSON cut
 # filters follow these, sorted by name.
-FILTER_MODULES: tuple[ModuleType, ...] = (localize,)
+FILTER_MODULES: tuple[ModuleType, ...] = (localize, scotty750)
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,21 @@ class FilterDescriptor:
     run: Callable[..., StageResult]
     slack_display: SlackDisplay
     enabled: bool = True
+
+
+def _code_filter_enabled(cfg: PipelineConfig, module: ModuleType) -> bool:
+    """Whether a code filter's own config section leaves it on.
+
+    A filter whose section is present follows its ``enabled`` switch. One whose
+    section is absent is on, unless the module declares
+    ``ENABLED_WITHOUT_SECTION = False`` -- a filter that only makes sense in a
+    run configured for it, such as SCOTTY750, whose input is selected by its own
+    BOOM pipelines.
+    """
+    section = getattr(cfg, module.STAGE, None)
+    if section is None:
+        return bool(getattr(module, "ENABLED_WITHOUT_SECTION", True))
+    return bool(getattr(section, "enabled", True))
 
 
 def filter_descriptors(cfg: PipelineConfig) -> tuple[FilterDescriptor, ...]:
@@ -105,8 +120,7 @@ def filter_descriptors(cfg: PipelineConfig) -> tuple[FilterDescriptor, ...]:
             # Off if either switch says so: the module's own section, or the
             # shared disabled list. The list accepting code filters too means
             # one knob turns any filter off, whichever kind it is.
-            enabled=bool(getattr(getattr(cfg, module.STAGE, None), "enabled", True))
-            and module.STAGE not in disabled,
+            enabled=_code_filter_enabled(cfg, module) and module.STAGE not in disabled,
         )
         for module in FILTER_MODULES
     ]
