@@ -1,6 +1,7 @@
 """Querying several surveys in one run, and the shipped SCOTTY750 config and BOOM pipelines."""
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import nested_pandas as npd
@@ -112,6 +113,13 @@ def test_the_shipped_overlay_validates_over_the_main_config():
     assert cfg.crossmatch.catalogs["desi_dr2"].catalog.name == "desi_dr2_zcat"
     for survey, path in cfg.query.boom.pipelines.items():
         assert (REPO / path).exists(), f"{survey} pipeline {path} is missing"
+
+
+def test_the_nightly_sweep_fits_in_one_boom_query():
+    """BOOM rejects a window over 7.0 days; the sweep must stay inside it."""
+    cfg = load_config([REPO / "config.toml", REPO / "scotty750.toml", REPO / "scotty750_nightly.toml"])
+    assert timedelta(days=6) < cfg.query.window.lookback < timedelta(days=7)
+    assert cfg.fritz.filters == ["scotty750"]
 
 
 @pytest.mark.parametrize("survey", ["ztf", "lsst", "decam"])

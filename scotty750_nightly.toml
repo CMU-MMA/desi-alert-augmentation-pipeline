@@ -1,0 +1,13 @@
+# SCOTTY750 nightly sweep -- the last week, once a day.
+#
+#   desi-aap run -c config.toml -c scotty750.toml -c scotty750_nightly.toml
+#
+# The hourly run looks back three hours by observation time, so alerts that
+# reach BOOM later than that -- DECam batches arrive a day or more late -- are
+# never seen by it. This sweep re-reads the whole last week once a day and
+# saves whatever passes. Re-saving an object the hourly runs already saved is
+# harmless: every Fritz step is safe to repeat.
+
+[query.window]
+# Just under seven days: BOOM rejects a query window longer than 7.0 days.
+lookback = "6d23h"

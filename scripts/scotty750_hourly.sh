@@ -9,4 +9,6 @@
 set -euo pipefail
 REPO=/ocean/projects/phy250012p/xhall/GitHub/desi-alert-augmentation-pipeline
 cd "$REPO"
-exec /ocean/projects/phy250012p/xhall/envs/desi-aap/bin/desi-aap run -c config.toml -c scotty750.toml
+# Any arguments are passed on, so the nightly sweep is
+#   scripts/scotty750_hourly.sh -c scotty750_nightly.toml
+exec /ocean/projects/phy250012p/xhall/envs/desi-aap/bin/desi-aap run -c config.toml -c scotty750.toml "$@"

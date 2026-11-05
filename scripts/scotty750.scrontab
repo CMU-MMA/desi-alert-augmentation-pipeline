@@ -11,4 +11,6 @@
 #SCRON --time=00:50:00
 #SCRON --output=/ocean/projects/phy250012p/xhall/GitHub/desi-alert-augmentation-pipeline/output/scotty750/scron.log
 #SCRON --open-mode=append
-5 * * * * /ocean/projects/phy250012p/xhall/GitHub/desi-alert-augmentation-pipeline/scripts/scotty750_hourly.sh
+# Hourly, except 18:05 UTC, when the nightly 7-day sweep runs instead.
+5 0-17,19-23 * * * /ocean/projects/phy250012p/xhall/GitHub/desi-alert-augmentation-pipeline/scripts/scotty750_hourly.sh
+5 18 * * * /ocean/projects/phy250012p/xhall/GitHub/desi-alert-augmentation-pipeline/scripts/scotty750_hourly.sh -c scotty750_nightly.toml

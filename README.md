@@ -482,7 +482,8 @@ login shell. `--dry-run` makes no Fritz request at all.
 repeat it:
 
 - **tmux**, on a machine that stays up: `scripts/scotty750_loop.sh` runs it at
-  five past every hour and logs each run to `output/scotty750/loop.log`.
+  five past every hour, and the nightly sweep (below) in its place at 18:05
+  UTC, logging each to `output/scotty750/loop.log`.
 
   ```bash
   tmux new -d -s scotty750 scripts/scotty750_loop.sh
@@ -493,7 +494,10 @@ repeat it:
   (this replaces your scrontab; `scrontab -r` removes it).
 
 The three-hour lookback overlaps the hourly runs, since alerts can reach BOOM
-late and every Fritz step is safe to repeat. `scotty750.toml` sizes Dask for a
+late and every Fritz step is safe to repeat. Some arrive much later than that
+-- DECam batches can land a day or more after they were taken -- so once a day
+a **nightly sweep** (`scotty750_nightly.toml`, layered last) re-reads the whole
+last week, just under BOOM's 7-day query limit, and saves whatever passes. `scotty750.toml` sizes Dask for a
 small VM: two 1.5 GB workers.
 
 ## The distance stage
